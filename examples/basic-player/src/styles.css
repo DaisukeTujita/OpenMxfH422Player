@@ -1,0 +1,31 @@
+:root { font-family: Inter, system-ui, sans-serif; color: #e9eef7; background: #0b0e14; font-synthesis: none; }
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 320px; }
+button, input { font: inherit; }
+main { width: min(1040px, calc(100% - 32px)); margin: 0 auto; padding: 56px 0 80px; }
+header { margin-bottom: 32px; }
+h1 { margin: 6px 0 10px; font-size: clamp(2rem, 6vw, 4rem); letter-spacing: -0.04em; }
+.eyebrow { color: #65d6ad; font-size: .8rem; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; }
+.description, .filename { color: #9aa7b8; }
+.panel { padding: 20px; border: 1px solid #283142; border-radius: 14px; background: #121722; }
+.file-panel { display: flex; align-items: center; gap: 18px; margin-bottom: 18px; }
+.file-picker { display: inline-flex; cursor: pointer; padding: 10px 16px; border-radius: 8px; color: #07110e; background: #65d6ad; font-weight: 700; }
+.file-picker input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+.filename { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.viewer { display: grid; min-height: 420px; place-items: center; overflow: hidden; border: 1px solid #283142; border-radius: 14px 14px 0 0; background: #020304; }
+.viewer > div, .viewer canvas { width: 100%; }
+.empty-state { color: #6f7b8c; text-align: center; }
+.controls { border-radius: 0 0 14px 14px; }
+.button-row, .seek-row { display: flex; align-items: center; gap: 12px; }
+button { min-width: 96px; padding: 9px 14px; border: 1px solid #3b475a; border-radius: 8px; color: inherit; background: #1d2532; cursor: pointer; }
+button:hover:not(:disabled) { border-color: #65d6ad; }
+button:disabled { cursor: not-allowed; opacity: .4; }
+.seek-row { margin-top: 18px; color: #9aa7b8; font-variant-numeric: tabular-nums; }
+.seek-row input { flex: 1; accent-color: #65d6ad; }
+.status-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; margin-top: 18px; }
+.status-grid h2 { margin: 0 0 12px; color: #9aa7b8; font-size: .78rem; letter-spacing: .08em; text-transform: uppercase; }
+.status-grid p { margin: 0; }
+.status { color: #65d6ad; }
+.status-error, .error-panel p:not(:empty) { color: #ff8f8f; }
+.error-panel { grid-column: 1 / -1; }
+@media (max-width: 620px) { main { padding-top: 28px; } .file-panel { align-items: flex-start; flex-direction: column; } .viewer { min-height: 240px; } .status-grid { grid-template-columns: 1fr; } .error-panel { grid-column: auto; } }

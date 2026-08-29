@@ -32,3 +32,16 @@ export default function Preview({ file }: { file: File }) {
 ## ローカルMXFサンプル
 
 MXFはバイナリのためGit管理しません。テスト素材は`public/samples/example.mxf`のようにローカル配置してください（このディレクトリのMXFは`.gitignore`対象です）。Vite開発サーバーでは`src="/samples/example.mxf"`として参照できます。素材のライセンスと機密性を確認し、共有が必要な場合はGit LFSやアクセス制御されたオブジェクトストレージを利用してください。
+
+## サンプルWebアプリ
+
+`examples/basic-player`に、ローカルのMXFファイルを選択して本ライブラリの公開APIを試せるReact + TypeScript製アプリがあります。ライブラリのソースはコピーせず、Viteのaliasでこのリポジトリの`src/index.ts`を参照します。
+
+リポジトリのルートで次のコマンドを実行してください。
+
+```sh
+npm install
+npm run dev --workspace @openmxf/basic-player-example
+```
+
+表示されたURL（通常は`http://localhost:5173`）をブラウザで開き、手元のOP1a / XDCAM HD422 MXFを選択します。MXFファイル自体をリポジトリへ追加する必要はありません。プロダクションビルドは`npm run build:example`で確認できます。

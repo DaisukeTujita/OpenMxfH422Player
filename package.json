@@ -7,6 +7,7 @@
   "types": "./dist/index.d.ts",
   "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
   "files": ["dist", "README.md"],
+  "workspaces": ["examples/basic-player"],
   "scripts": {
     "copy:libav:public": "node scripts/copy-libav-assets.mjs public/libav",
     "copy:libav:dist": "node scripts/copy-libav-assets.mjs dist/libav",
@@ -14,7 +15,8 @@
     "build": "rm -rf dist && tsc -p tsconfig.json && npm run copy:libav:dist",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "lint": "eslint src scripts vite.config.ts",
+    "lint": "eslint src scripts examples/basic-player/src examples/basic-player/vite.config.ts vite.config.ts",
+    "build:example": "npm run build --workspace @openmxf/basic-player-example",
     "check:binaries": "node scripts/check-no-binaries.mjs"
   },
   "peerDependencies": { "react": ">=18", "react-dom": ">=18" },

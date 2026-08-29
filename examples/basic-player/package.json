@@ -1,0 +1,24 @@
+{
+  "name": "@openmxf/basic-player-example",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "copy:libav": "node ../../scripts/copy-libav-assets.mjs examples/basic-player/public/libav",
+    "dev": "npm run copy:libav && vite",
+    "build": "npm run copy:libav && tsc --noEmit && vite build"
+  },
+  "dependencies": {
+    "@openmxf/h422-player": "file:../..",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1"
+  },
+  "devDependencies": {
+    "@types/react": "^19.1.10",
+    "@types/react-dom": "^19.1.7",
+    "@types/node": "^24.3.0",
+    "@vitejs/plugin-react": "^5.0.2",
+    "typescript": "^5.9.2",
+    "vite": "^7.1.3"
+  }
+}

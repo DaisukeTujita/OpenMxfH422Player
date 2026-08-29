@@ -3,6 +3,7 @@ node_modules/
 
 # libav.js runtime artifacts are copied from node_modules during dev/build.
 public/libav/
+examples/basic-player/public/libav/
 *.wasm
 *.data
 
