@@ -1,0 +1,13 @@
+dist/
+node_modules/
+
+# libav.js runtime artifacts are copied from node_modules during dev/build.
+public/libav/
+*.wasm
+*.data
+
+# MXF fixtures are intentionally local: see public/samples/README.md.
+public/samples/*
+!public/samples/README.md
+*.mxf
+*.MXF
