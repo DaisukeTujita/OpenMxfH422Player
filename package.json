@@ -19,16 +19,17 @@
     "examples/basic-player"
   ],
   "scripts": {
+    "setup:libav": "node scripts/setup-libav-assets.mjs",
     "copy:libav:public": "node scripts/copy-libav-assets.mjs public/libav",
     "copy:libav:dist": "node scripts/copy-libav-assets.mjs dist/libav",
     "dev": "npm run copy:libav:public && vite",
-    "build": "rm -rf dist && tsc -p tsconfig.json && npm run copy:libav:dist",
+    "build": "node scripts/clean.mjs dist && tsc -p tsconfig.json && npm run copy:libav:dist",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src scripts examples/basic-player/src examples/basic-player/vite.config.ts vite.config.ts",
     "build:example": "npm run build --workspace @openmxf/basic-player-example",
     "check:binaries": "node scripts/check-no-binaries.mjs",
-    "build:libav": "bash scripts/build-libav-h422.sh",
+    "build:libav": "node scripts/build-libav-h422.mjs",
     "sample:mxf": "bash scripts/create-test-mxf.sh"
   },
   "peerDependencies": {
