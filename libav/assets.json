@@ -2,8 +2,8 @@
   "version": "v6.10.9.0-h422.1",
   "baseUrl": "https://github.com/DaisukeTujita/OpenMxfH422Player/releases/download/v6.10.9.0-h422.1",
   "assets": [
-    { "name": "libav-h422.mjs", "sha256": "7c45c009f5f385570226efe828960482b66c8277d2d3ff50a5c670f44e20c714" },
-    { "name": "libav-6.10.9.0-h422.wasm.mjs", "sha256": "c9926b216d7315633d55c1fe15b65e799a3218b4c9d8c930ecb92adea44a2c8e" },
-    { "name": "libav-6.10.9.0-h422.wasm.wasm", "sha256": "130e4d47ce47aad4ff18ba61cfbfd7d9c6d65d05ff2c2fc7efbe0c28d2307c17" }
+    { "name": "libav-h422.mjs", "sha256": "fdf8f48f5649c978ad6686849ce7c4d2a8401d9e32c04e7f8bf53e57bab51847" },
+    { "name": "libav-6.10.9.0-h422.wasm.mjs", "sha256": "f38a7d4dbd4e761e773d7f585a9201d025094bf8491ecfe69f4a6da75d52e4ec" },
+    { "name": "libav-6.10.9.0-h422.wasm.wasm", "sha256": "518ba130337298fab47c8b7e564aa908d93ca103e046e6386816b7633cea0415" }
   ]
 }
