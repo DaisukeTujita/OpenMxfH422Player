@@ -12,3 +12,5 @@ public/samples/*
 !public/samples/README.md
 *.mxf
 *.MXF
+libav/dist/
+.cache/libav.js/

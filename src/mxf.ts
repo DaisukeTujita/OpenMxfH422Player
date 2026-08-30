@@ -13,6 +13,8 @@ export interface ParsedMxf {
   packets: EssencePacket[];
   operationalPattern: "OP1a";
   isXdcamHd422: true;
+  videoCodec: { codecId: 2; codecName: "mpeg2video" };
+  audioCodec?: { codecId: 65549; codecName: "pcm_s24be" };
 }
 
 function hex(data: Uint8Array): string {
@@ -76,5 +78,9 @@ export function parseMxf(data: Uint8Array): ParsedMxf {
   if (!op1a) throw new Error("Unsupported MXF: only OP1a is accepted");
   if (!packets.some(p => p.kind === "video") || !xdcam)
     throw new Error("Unsupported essence: expected XDCAM HD422 MPEG-2");
-  return { packets, operationalPattern: "OP1a", isXdcamHd422: true };
+  return {
+    packets, operationalPattern: "OP1a", isXdcamHd422: true,
+    videoCodec: { codecId: 2, codecName: "mpeg2video" },
+    audioCodec: packets.some(p => p.kind === "audio") ? { codecId: 65549, codecName: "pcm_s24be" } : undefined,
+  };
 }

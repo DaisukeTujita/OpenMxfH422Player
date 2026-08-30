@@ -5,9 +5,19 @@
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
-  "files": ["dist", "README.md"],
-  "workspaces": ["examples/basic-player"],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "workspaces": [
+    "examples/basic-player"
+  ],
   "scripts": {
     "copy:libav:public": "node scripts/copy-libav-assets.mjs public/libav",
     "copy:libav:dist": "node scripts/copy-libav-assets.mjs dist/libav",
@@ -17,10 +27,15 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint src scripts examples/basic-player/src examples/basic-player/vite.config.ts vite.config.ts",
     "build:example": "npm run build --workspace @openmxf/basic-player-example",
-    "check:binaries": "node scripts/check-no-binaries.mjs"
+    "check:binaries": "node scripts/check-no-binaries.mjs",
+    "build:libav": "bash scripts/build-libav-h422.sh",
+    "sample:mxf": "bash scripts/create-test-mxf.sh"
   },
-  "peerDependencies": { "react": ">=18", "react-dom": ">=18" },
-  "dependencies": { "@libav.js/variant-webcodecs": "^6.10.9" },
+  "peerDependencies": {
+    "react": ">=18",
+    "react-dom": ">=18"
+  },
+  "dependencies": {},
   "devDependencies": {
     "@eslint/js": "^9.34.0",
     "@types/react": "^19.1.10",
