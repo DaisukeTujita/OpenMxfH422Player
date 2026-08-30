@@ -2,7 +2,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SOURCE="${LIBAVJS_SOURCE:-$ROOT/.cache/libav.js}"
-VERSION="${LIBAVJS_VERSION:-v6.10.9}"
+VERSION="${LIBAVJS_VERSION:-v6.10.9.0}"
 if [[ ! -d "$SOURCE/.git" ]]; then
   mkdir -p "$(dirname "$SOURCE")"
   git clone --depth 1 --branch "$VERSION" https://github.com/Yahweasel/libav.js.git "$SOURCE"

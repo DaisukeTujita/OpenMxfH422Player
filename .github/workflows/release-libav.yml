@@ -1,0 +1,27 @@
+name: Release custom libav.js
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: "3.1.74"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm run build:libav
+      - name: Verify pinned checksums
+        run: node scripts/verify-release-assets.mjs
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v6.10.9.0-h422.1
+          files: libav/dist/*
+          fail_on_unmatched_files: true

@@ -8,15 +8,29 @@ React向けのブラウザ完結型 **MXF OP1a / MPEG-2 422P@HL** プレイヤ�
 
 > 現在の軽量KLV readerはOP1a/XDCAM essenceを識別してパケットを取り出します。カスタムWASMには将来libavformatへdemuxを統合できるようMXF demuxerも含めています。
 
-## インストールとカスタムWASM
+## Windows 11（PowerShell）での起動
 
-```sh
+```powershell
+git clone https://github.com/DaisukeTujita/OpenMxfH422Player.git
+Set-Location OpenMxfH422Player
 npm install
-npm run build:libav
 npm run dev
 ```
 
-`libav/config.json`が再現可能な最小構成です。MXF demuxer、MPEG-2 Video parser/decoder、signed 24-bit PCM decoder（BE/LE）、swscale、swresampleを含みます。`scripts/build-libav-h422.sh`はlibav.js v6.10.9を取得して`h422` variantを生成します。生成物は`libav/dist`へ置かれ、`copy-libav-assets.mjs`が開発時は`public/libav`、ライブラリbuild時は`dist/libav`へコピーします。WASMバイナリはGitには登録しません。
+Node.js 20以上を使用してください。初回の`npm run dev`は、バージョンを固定したカスタムlibav.jsをGitHub Releaseから自動取得し、SHA-256を検証して`libav/dist`へ配置します。**Bash、Make、WSL、Emscriptenは不要**です。取得だけを先に行う場合は`npm run setup:libav`を実行できます。社内ミラーではPowerShellで`$env:LIBAV_ASSET_BASE_URL = "https://example.invalid/libav"`を設定してください。
+
+取得に失敗した場合は、ネットワークまたはReleaseの公開状態を確認して`npm run setup:libav`を再実行してください。検証に失敗したファイルは使用されません。続いて、PowerShellから次のコマンドもそのまま実行できます。
+
+```powershell
+npm run build
+npm run build:example
+```
+
+## カスタムWASMの構成と配布
+
+`libav/config.json`が再現可能な最小構成です。MXF demuxer、MPEG-2 Video parser/decoder、signed 24-bit PCM decoder（BE/LE）、swscale、swresampleを含みます。配布者用の`scripts/build-libav-h422.sh`はlibav.js **v6.10.9.0**を取得して`h422` variantを生成します。GitHub Actionsの`Release custom libav.js` workflowがLinux/Emscriptenで生成し、固定tagのReleaseへ公開します。`libav/assets.json`にはRelease URL、ファイル名、SHA-256を固定しています。生成物とWASMはGitには登録しません。
+
+通常の利用者は`build:libav`を実行しません。Release更新時だけ、配布者が生成物のSHA-256を`libav/assets.json`へ反映してからworkflowを実行します。workflow自身も公開前に同じハッシュを検証するため、設定と異なる生成物を誤って配布しません。
 
 独自CDNへ配置する場合は、生成した`libav-h422.mjs`と`*-h422.wasm.mjs`、`*-h422.wasm.wasm`を同じ公開ディレクトリへ置き、そのURLを`libavBase`へ指定してください。
 
@@ -61,4 +75,4 @@ npm run dev --workspace @openmxf/basic-player-example
 
 libav.jsおよび組み込まれるFFmpeg部分は **GNU LGPL 2.1** です。生成JavaScript内のライセンス表示を削除せず、配布物にはライセンス本文と使用の告知を添付してください。WASM/object codeを配布する場合は、LGPL 2.1が要求する完全な対応ソース（使用したlibav.js/FFmpegソース、変更、ビルドスクリプト・構成）を同じ場所から提供するか、同等の適法な提供方法を用意してください。本リポジトリでは固定tag、`libav/config.json`、build scriptを公開し、受領者が差し替え版を再buildできるようにしています。配布者は自身の配布方法についてライセンス条件を確認してください。
 
-対応ソース: [Yahweasel/libav.js v6.10.9](https://github.com/Yahweasel/libav.js/tree/v6.10.9) / [LGPL 2.1](https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html)
+対応ソース: [Yahweasel/libav.js v6.10.9.0](https://github.com/Yahweasel/libav.js/tree/v6.10.9.0) / [LGPL 2.1](https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html)
