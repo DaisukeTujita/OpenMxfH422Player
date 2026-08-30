@@ -11,7 +11,14 @@ fi
   cd "$SOURCE/configs"
   node ./mkconfig.js h422 "$(cat "$ROOT/libav/config.json")"
 )
-make -C "$SOURCE" build-h422
+(
+  # libav.js uses PWD as the base for build/install paths, so enter the source
+  # tree instead of using `make -C` from the repository checkout.
+  cd "$SOURCE"
+  make \
+    dist/libav-h422.mjs \
+    "dist/libav-${VERSION#v}-h422.wasm.mjs"
+)
 mkdir -p "$ROOT/libav/dist"
 cp "$SOURCE"/dist/libav-h422.mjs "$ROOT/libav/dist/"
 cp "$SOURCE"/dist/libav-*-h422.wasm.{mjs,wasm} "$ROOT/libav/dist/"

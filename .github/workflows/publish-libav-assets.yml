@@ -1,0 +1,86 @@
+name: Publish custom libav.js assets
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  RELEASE_TAG: v6.10.9.0-h422.1
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Require a public repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          visibility=$(gh api "repos/$GITHUB_REPOSITORY" --jq .visibility)
+          if [ "$visibility" != public ]; then
+            echo "Release assets must be anonymously downloadable, but repository visibility is: $visibility" >&2
+            echo "Make the repository public or publish the assets from a separate public repository/storage." >&2
+            exit 1
+          fi
+
+      - name: Refuse to modify an existing release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $RELEASE_TAG already exists; refusing to mix or replace assets." >&2
+            exit 1
+          fi
+
+      - uses: mymindstorm/setup-emsdk@6ab9eb1bda2574c4ddb79809fc9247783eaf9021 # v14
+        with:
+          version: "3.1.74"
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+
+      - name: Build custom runtime
+        run: npm run build:libav
+
+      - name: Verify built asset checksums
+        run: node scripts/verify-release-assets.mjs
+
+      - name: Create release with exactly three assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$RELEASE_TAG" \
+            libav/dist/libav-h422.mjs \
+            libav/dist/libav-6.10.9.0-h422.wasm.mjs \
+            libav/dist/libav-6.10.9.0-h422.wasm.wasm \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Custom libav.js $RELEASE_TAG" \
+            --notes "OpenMxfH422Player custom MXF/MPEG-2/PCM libav.js runtime."
+
+      - name: Verify published URLs and checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir published-assets
+          node --input-type=module <<'EOF'
+          import { readFile, writeFile } from "node:fs/promises";
+          const manifest = JSON.parse(await readFile("libav/assets.json", "utf8"));
+          for (const asset of manifest.assets) {
+            const url = `${manifest.baseUrl}/${asset.name}`;
+            let response;
+            for (let attempt = 1; attempt <= 12; attempt++) {
+              response = await fetch(url, { redirect: "follow" });
+              if (response.status === 200) break;
+              if (attempt === 12) throw new Error(`${url}: HTTP ${response.status}`);
+              await new Promise(resolve => setTimeout(resolve, 5000));
+            }
+            const data = Buffer.from(await response.arrayBuffer());
+            await writeFile(`published-assets/${asset.name}`, data);
+            console.log(`HTTP 200 ${url}`);
+          }
+          EOF
+          node scripts/verify-release-assets.mjs published-assets
