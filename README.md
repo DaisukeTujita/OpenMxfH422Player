@@ -17,7 +17,11 @@ npm install
 npm run dev
 ```
 
-Node.js 20以上を使用してください。初回の`npm run dev`は、バージョンを固定したカスタムlibav.jsをGitHub Releaseから自動取得し、SHA-256を検証して`libav/dist`へ配置します。**Bash、Make、WSL、Emscriptenは不要**です。取得だけを先に行う場合は`npm run setup:libav`を実行できます。社内ミラーではPowerShellで`$env:LIBAV_ASSET_BASE_URL = "https://example.invalid/libav"`を設定してください。
+Node.js 20以上を使用してください。初回の`npm run dev`は、バージョンを固定したカスタムlibav.jsをGitHub Releaseから自動取得し、SHA-256を検証して`libav/dist`へ配置します。**Bash、Make、WSL、Emscriptenは不要**です。取得だけを先に行う場合は`npm run setup:libav`を実行できます。
+
+> **公開配布の前提:** `libav/assets.json`はこのリポジトリのGitHub Releaseを参照するため、この手順を認証なしのWindowsで使用するには、Releaseだけでなく**リポジトリ自体をpublicにする必要があります**。privateリポジトリのReleaseは匿名の`fetch()`から取得できません。GitHub tokenをダウンロード処理へ渡す方式は、認証設定なしの`npm install`と`npm run dev`だけで起動する要件を満たさないため採用していません。Release公開workflowもリポジトリがprivateなら公開前に停止します。
+
+リポジトリをprivateのまま運用する場合の推奨方式は、3ファイルだけを別のpublicリポジトリのRelease、または匿名HTTP GETとCORSを許可したpublic object storage/CDNへ配置することです。その公開URLを`libav/assets.json`の`baseUrl`に固定すれば、Windows利用者の追加設定は不要です。組織内ミラーを利用して利用者側で設定する場合は、PowerShellで`$env:LIBAV_ASSET_BASE_URL = "https://example.invalid/libav"`を設定できますが、この場合は環境変数の設定が必要なので「2コマンドだけ」の起動手順にはなりません。
 
 取得に失敗した場合は、ネットワークまたはReleaseの公開状態を確認して`npm run setup:libav`を再実行してください。検証に失敗したファイルは使用されません。続いて、PowerShellから次のコマンドもそのまま実行できます。
 

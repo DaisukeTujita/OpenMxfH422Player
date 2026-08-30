@@ -13,7 +13,18 @@ jobs:
   build-and-publish:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Require a public repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          visibility=$(gh api "repos/$GITHUB_REPOSITORY" --jq .visibility)
+          if [ "$visibility" != public ]; then
+            echo "Release assets must be anonymously downloadable, but repository visibility is: $visibility" >&2
+            echo "Make the repository public or publish the assets from a separate public repository/storage." >&2
+            exit 1
+          fi
 
       - name: Refuse to modify an existing release
         env:
@@ -24,11 +35,11 @@ jobs:
             exit 1
           fi
 
-      - uses: mymindstorm/setup-emsdk@v14
+      - uses: mymindstorm/setup-emsdk@6ab9eb1bda2574c4ddb79809fc9247783eaf9021 # v14
         with:
           version: "3.1.74"
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
 
@@ -44,8 +55,8 @@ jobs:
         run: |
           gh release create "$RELEASE_TAG" \
             libav/dist/libav-h422.mjs \
-            libav/dist/libav-*-h422.wasm.mjs \
-            libav/dist/libav-*-h422.wasm.wasm \
+            libav/dist/libav-6.10.9.0-h422.wasm.mjs \
+            libav/dist/libav-6.10.9.0-h422.wasm.wasm \
             --repo "$GITHUB_REPOSITORY" \
             --title "Custom libav.js $RELEASE_TAG" \
             --notes "OpenMxfH422Player custom MXF/MPEG-2/PCM libav.js runtime."
