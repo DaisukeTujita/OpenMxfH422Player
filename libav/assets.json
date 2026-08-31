@@ -4,6 +4,6 @@
   "assets": [
     { "name": "libav-h422.mjs", "sha256": "fdf8f48f5649c978ad6686849ce7c4d2a8401d9e32c04e7f8bf53e57bab51847" },
     { "name": "libav-6.10.9.0-h422.wasm.mjs", "sha256": "f38a7d4dbd4e761e773d7f585a9201d025094bf8491ecfe69f4a6da75d52e4ec" },
-    { "name": "libav-6.10.9.0-h422.wasm.wasm", "sha256": "11438337b53aadb575ff7a73919e5aaaa9b25d8d24e72ef4336c2084232a3994" }
+    { "name": "libav-6.10.9.0-h422.wasm.wasm", "sha256": "518ba130337298fab47c8b7e564aa908d93ca103e046e6386816b7633cea0415" }
   ]
 }
