@@ -32,9 +32,11 @@ npm run build:example
 
 ## カスタムWASMの構成と配布
 
-`libav/config.json`が再現可能な最小構成です。MXF demuxer、MPEG-2 Video parser/decoder、signed 24-bit PCM decoder（BE/LE）、swscale、swresampleを含みます。配布者用の`scripts/build-libav-h422.sh`はlibav.js **v6.10.9.0**を取得して`h422` variantを生成します。GitHub Actionsの`Release custom libav.js` workflowがLinux/Emscriptenで生成し、固定tagのReleaseへ公開します。`libav/assets.json`にはRelease URL、ファイル名、SHA-256を固定しています。生成物とWASMはGitには登録しません。
+`libav/config.json`が再現可能な最小構成です。MXF demuxer、MPEG-2 Video parser/decoder、signed 24-bit PCM decoder（BE/LE）、swscale、swresampleを含みます。配布者用の`scripts/build-libav-h422.sh`はlibav.js **v6.10.9.0**を取得して`h422` variantを生成します。GitHub Actionsの`Verify or publish custom libav.js assets` workflowはPRでも既定で検証だけを行います。Release公開はmainブランチから手動実行し、`publish`を明示的に選んだ場合に限られます。`libav/assets.json`にはRelease URL、ファイル名、SHA-256を固定しています。生成物とWASMはGitには登録しません。
 
 通常の利用者は`build:libav`を実行しません。Release更新時だけ、配布者が生成物のSHA-256を`libav/assets.json`へ反映してからworkflowを実行します。workflow自身も公開前に同じハッシュを検証するため、設定と異なる生成物を誤って配布しません。
+
+WASMのSHA-256は、同じFFmpeg tagでも取得物やbuild metadataが異なれば変化します。Codex CloudでFFmpeg公式tarballの代わりにGitHub checkoutから作った代替tarballを使用したbuildは、JavaScript glueが一致してもWASM本体がActions buildと一致しませんでした。公開workflowは異なる絶対パスへソースを取得して2回clean buildし、3ファイルがbyte-for-byteで一致した場合だけ先へ進みます。またWASM custom sectionを解析し、debug/source-map sectionやrunner、workspace、Windowsの絶対パスが含まれていないことを確認します。manifestの値はこの再現性検査を通るGitHub Actions buildを基準にします。
 
 独自CDNへ配置する場合は、生成した`libav-h422.mjs`と`*-h422.wasm.mjs`、`*-h422.wasm.wasm`を同じ公開ディレクトリへ置き、そのURLを`libavBase`へ指定してください。
 
