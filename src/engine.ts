@@ -66,7 +66,8 @@ export class PlayerEngine {
   private async decodeVideo(chunks: Uint8Array[], codecId: number): Promise<void> {
     const av=this.libav!;
     // ff_init_decoder receives the codec_id detected for the MXF essence (AV_CODEC_ID_MPEG2VIDEO=2).
-    const [codec,ctx,pkt,frame]=await av.ff_init_decoder(codecId);
+    const [,ctx,pkt,frame]=await av.ff_init_decoder(codecId);
+    let decodeFailure: { error: unknown }|undefined;
     try {
       const packets=chunks.map((data,i)=>({data,pts:i,time_base_num:1001,time_base_den:30000}));
       const decoded=await av.ff_decode_multi(ctx,pkt,frame,packets,true) as DecodedFrame[];
@@ -83,7 +84,12 @@ export class PlayerEngine {
         const rgba=yuv422pToRgba(plane(0,f.width),plane(1,chromaWidth),plane(2,chromaWidth),f.width,f.height);
         this.frames.push({frame:new ImageData(new Uint8ClampedArray(rgba),f.width,f.height),time:i/XDCAM_FRAME_RATE});
       }
-    } finally { await av.ff_free_decoder(codec,ctx,pkt,frame); }
+    } catch (error) {
+      decodeFailure={error};
+    }
+    try { await av.ff_free_decoder(ctx,pkt,frame); }
+    catch (error) { if (!decodeFailure) throw error; }
+    if (decodeFailure) throw decodeFailure.error;
   }
   private async preparePcm(chunks: Uint8Array[]): Promise<void> {
     this.audio=new AudioContext({sampleRate:48000});
