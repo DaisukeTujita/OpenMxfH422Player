@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { loadCustomLibAV } from "./engine";
+import { loadCustomLibAV, PlayerEngine } from "./engine";
 
 function moduleUrl(source: string): string {
   return `data:text/javascript,${encodeURIComponent(source)}`;
@@ -45,5 +45,74 @@ describe("loadCustomLibAV", () => {
       options: { base: "/libav", noworker: false },
     });
     expect(revokeObjectURL).toHaveBeenCalledWith(loadedModule);
+  });
+});
+
+type DecoderMock = {
+  ff_init_decoder: ReturnType<typeof vi.fn>;
+  ff_decode_multi: ReturnType<typeof vi.fn>;
+  ff_free_decoder: ReturnType<typeof vi.fn>;
+};
+
+function decoderHarness(av: DecoderMock) {
+  const engine = Object.create(PlayerEngine.prototype) as {
+    libav: DecoderMock;
+    decodeVideo(chunks: Uint8Array[], codecId: number): Promise<void>;
+  };
+  engine.libav = av;
+  return engine;
+}
+
+describe("PlayerEngine decoder cleanup", () => {
+  it("frees ctx, pkt, and frame exactly once after successful decoding", async () => {
+    const [codec, ctx, pkt, frame] = [11, 22, 33, 44];
+    const av = {
+      ff_init_decoder: vi.fn().mockResolvedValue([codec, ctx, pkt, frame]),
+      ff_decode_multi: vi.fn().mockResolvedValue([]),
+      ff_free_decoder: vi.fn().mockResolvedValue(undefined),
+    };
+
+    await decoderHarness(av).decodeVideo([new Uint8Array([1])], 2);
+
+    expect(av.ff_free_decoder).toHaveBeenCalledOnce();
+    expect(av.ff_free_decoder).toHaveBeenCalledWith(ctx, pkt, frame);
+    expect(av.ff_free_decoder.mock.calls[0]).not.toContain(codec);
+  });
+
+  it("frees the decoder exactly once after decoding fails", async () => {
+    const decodeError = new Error("decode failed");
+    const av = {
+      ff_init_decoder: vi.fn().mockResolvedValue([11, 22, 33, 44]),
+      ff_decode_multi: vi.fn().mockRejectedValue(decodeError),
+      ff_free_decoder: vi.fn().mockResolvedValue(undefined),
+    };
+
+    await expect(decoderHarness(av).decodeVideo([], 2)).rejects.toBe(decodeError);
+    expect(av.ff_free_decoder).toHaveBeenCalledOnce();
+  });
+
+  it("does not hide a decoding error when decoder cleanup also fails", async () => {
+    const decodeError = new Error("decode failed");
+    const cleanupError = new Error("cleanup failed");
+    const av = {
+      ff_init_decoder: vi.fn().mockResolvedValue([11, 22, 33, 44]),
+      ff_decode_multi: vi.fn().mockRejectedValue(decodeError),
+      ff_free_decoder: vi.fn().mockRejectedValue(cleanupError),
+    };
+
+    await expect(decoderHarness(av).decodeVideo([], 2)).rejects.toBe(decodeError);
+    expect(av.ff_free_decoder).toHaveBeenCalledOnce();
+  });
+
+  it("reports a cleanup error when decoding succeeded", async () => {
+    const cleanupError = new Error("cleanup failed");
+    const av = {
+      ff_init_decoder: vi.fn().mockResolvedValue([11, 22, 33, 44]),
+      ff_decode_multi: vi.fn().mockResolvedValue([]),
+      ff_free_decoder: vi.fn().mockRejectedValue(cleanupError),
+    };
+
+    await expect(decoderHarness(av).decodeVideo([], 2)).rejects.toBe(cleanupError);
+    expect(av.ff_free_decoder).toHaveBeenCalledOnce();
   });
 });
