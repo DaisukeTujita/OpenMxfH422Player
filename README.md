@@ -2,12 +2,6 @@
 
 React向けのブラウザ完結型 **MXF OP1a / MPEG-2 422P@HL** プレイヤーです。MPEG-2をWebCodecsへ渡さず、専用構成のlibav.js WebAssemblyでデコードし、yuv422pをRGBAへ変換してCanvas（WebGL）へ表示します。48 kHz / 24-bit PCMはplanar `Float32Array`へ変換してWeb Audio APIで再生します。
 
-## 原因調査
-
-従来コードは`@libav.js/variant-webcodecs` 6.10.9を初期化し、`ff_init_decoder("mpeg2video")`を呼んでいました。しかし同バリアントの構成にはMPEG-2 decoderもMXF demuxerもなく、`Codec not found`はそのためです。本実装はファイルから判定したFFmpegの`codec_id`（MPEG-2 Videoは`2`、24-bit big-endian PCMは`65549`）と`codec_name`をConsoleへ出力し、数値のvideo `codec_id`を`ff_init_decoder`へ渡します。WebCodecsによるMPEG-2対応は前提にしません。
-
-> 現在の軽量KLV readerはOP1a/XDCAM essenceを識別してパケットを取り出します。カスタムWASMには将来libavformatへdemuxを統合できるようMXF demuxerも含めています。
-
 ## Windows 11（PowerShell）での起動
 
 ```powershell
@@ -18,17 +12,6 @@ npm run dev
 ```
 
 Node.js 20以上を使用してください。初回の`npm run dev`は、バージョンを固定したカスタムlibav.jsをGitHub Releaseから自動取得し、SHA-256を検証して`libav/dist`へ配置します。**Bash、Make、WSL、Emscriptenは不要**です。取得だけを先に行う場合は`npm run setup:libav`を実行できます。
-
-> **公開配布の前提:** `libav/assets.json`はこのリポジトリのGitHub Releaseを参照するため、この手順を認証なしのWindowsで使用するには、Releaseだけでなく**リポジトリ自体をpublicにする必要があります**。privateリポジトリのReleaseは匿名の`fetch()`から取得できません。GitHub tokenをダウンロード処理へ渡す方式は、認証設定なしの`npm install`と`npm run dev`だけで起動する要件を満たさないため採用していません。Release公開workflowもリポジトリがprivateなら公開前に停止します。
-
-リポジトリをprivateのまま運用する場合の推奨方式は、3ファイルだけを別のpublicリポジトリのRelease、または匿名HTTP GETとCORSを許可したpublic object storage/CDNへ配置することです。その公開URLを`libav/assets.json`の`baseUrl`に固定すれば、Windows利用者の追加設定は不要です。組織内ミラーを利用して利用者側で設定する場合は、PowerShellで`$env:LIBAV_ASSET_BASE_URL = "https://example.invalid/libav"`を設定できますが、この場合は環境変数の設定が必要なので「2コマンドだけ」の起動手順にはなりません。
-
-取得に失敗した場合は、ネットワークまたはReleaseの公開状態を確認して`npm run setup:libav`を再実行してください。検証に失敗したファイルは使用されません。続いて、PowerShellから次のコマンドもそのまま実行できます。
-
-```powershell
-npm run build
-npm run build:example
-```
 
 ## カスタムWASMの構成と配布
 
@@ -58,24 +41,7 @@ export default function Preview({ file }: { file: File }) {
 - 1920×1080、50 Mb/s、30000/1001 fps、top-field-first
 - PCM signed 24-bit / 48 kHz / 2 ch（MXFで一般的なBEと、テスト生成時のLE decoderをWASMへ収録）
 
-入力全体とデコード済みフレームをメモリに保持するため、長尺素材にはストリーミング実装を推奨します。
-
-## テストMXFと操作確認
-
-Gitにバイナリを含めず、ローカルで5秒のテスト素材を生成します（`ffmpeg`が必要です）。
-
-```sh
-npm run sample:mxf
-npm run dev --workspace @openmxf/basic-player-example
-```
-
-`examples/basic-player`で`public/samples/h422-test.mxf`を選択し、次を確認します。
-
-1. Consoleにvideo/audioの`codec_id`と`codec_name`が表示され、先頭フレームが描画される。
-2. **再生**で映像と1 kHz音声が進み、**一時停止**で両方が止まる。
-3. **停止**で0秒へ戻り、シークバーの前後移動後に対応フレームと音声位置から再開する。
-
-自動テストはBER readerに加えて、yuv422p→RGBAと24-bit PCM→Web Audio float変換を検証します。
+入力全体とデコード済みフレームをメモリに保持するため、長尺素材は再生に負荷がかかります。
 
 ## ライセンスとソース提供
 
