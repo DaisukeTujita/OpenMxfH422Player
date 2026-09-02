@@ -17,11 +17,8 @@ edit unit、presentation time、所属Partition、および利用可能なIndex 
 `readEssenceRange()`は指定フレーム範囲だけを最大4 MiB単位で読み、Index Entryの
 KeyFrameOffset/RAPを優先して復号開始点を決めます。Index情報がない場合の既定prerollは45フレームです。
 
-現段階でReaderベースになった処理はmetadata/index解析、および公開されたEssence索引・
-区間取得APIです。PlayerEngineはまだEssence索引を作成・利用しません。既存OP1a/XDCAM HD422の
-連続再生互換性を維持するため、PlayerEngineのデコード入力生成、全尺RGBAフレーム、全尺PCMは
-まだ全体読み込み経路です。初回・seek区間デコードと継続再生バッファ補充をReader APIへ接続し、
-固定長キューにする作業は次PRに残ります。
+PlayerEngine の実験的な `streaming` モードはこの索引と区間取得APIを使用します。
+既定の `legacy` は既存OP1a/XDCAM HD422との互換性を優先し、従来どおり全体を読み込みます。
 
 索引処理はEssence Valueを個別の`Uint8Array`として生成しないため、ピークメモリを抑えます。
 ただし`FileRandomAccessReader`は既定で1 MiB単位のアライン済みチャンクを読むため、KLV間隔が
@@ -58,9 +55,21 @@ WASMのSHA-256は、同じFFmpeg tagでも取得物やbuild metadataが異なれ
 import { H422Player } from "@openmxf/h422-player";
 
 export default function Preview({ file }: { file: File }) {
-  return <H422Player src={file} libavBase="/libav" controls onError={console.error} />;
+  return <H422Player src={file} mode="streaming" libavBase="/libav" controls onError={console.error} />;
 }
 ```
+
+`mode` は `"legacy" | "streaming"` で、既定値は安全な `legacy` です。streaming では
+`readWhole()` を呼ばず、初回は約3秒、残量2秒未満で次の約3秒を取得します。表示済みから
+1秒より古いRGBAフレームを破棄し、seek時は旧要求をAbortしてseek先付近だけを再取得します。
+`ref.getDiagnostics()` と `onDiagnostics` からReader I/O、キャッシュ、キュー、世代を確認できます。
+
+**現時点の制約:** streaming のPCM区間スケジューリングと厳密なbuffering停止は未対応で、
+streamingでは音声を再生しません。音声を含む完走確認にはlegacyを使用してください。Index Tableの
+`StreamOffset`はBodySIDのEssence Container stream先頭を基準とする相対値であり、Partitionの
+絶対位置へ単純加算できません。本実装は推測による直接変換をせず、安全なKLVヘッダー順次索引へ
+フォールバックします。このためEssence Valueのメモリ化は避けますが、初回の物理I/O時間は
+ファイル長に比例し得ます。
 
 `src`には`File`、`Blob`、またはCORSを許可したURLを指定できます。`ref`から`play()`、`pause()`、`seek(seconds)`、`currentTime`、`duration`を利用できます。音声はブラウザのautoplay policyにより通常ユーザー操作後に開始します。シーク時はAudioBufferSourceNodeを指定位置から作り直します。
 
@@ -92,7 +101,7 @@ Stream OffsetはJavaScriptの安全な整数範囲に丸めず `bigint` で保�
 
 ## Indexとシーク
 
-`findSeekPoint()` は目的Edit Unit以前のRandom Access Pointを選択します。Index Entryがなく固定Edit Unit Byte Countがある場合はオフセットを算出し、Index Tableがない・壊れている場合は `source: "sequential-fallback"` として先頭からの順次走査を明示します。現在のプレイヤー本体は全フレームが既にデコード済みの従来シークを使用しており、Index位置からの部分読み込みとデコーダ再開は後続段階で統合します。
+`findSeekPoint()` は目的Edit Unit以前のRandom Access Pointを選択します。Index Entryがなく固定Edit Unit Byte Countがある場合はオフセットを算出し、Index Tableがない・壊れている場合は `source: "sequential-fallback"` として先頭からの順次走査を明示します。streamingシークはIndex EntryのKeyFrameOffset/RAPからprerollを選び、対象区間だけを読み直します。絶対位置が検証できないStreamOffsetは利用せず、KLV索引のvalue offsetを使用します。
 
 ## 読み込み・メモリ設計と段階的移行
 

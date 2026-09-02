@@ -6,6 +6,8 @@ import {
   type MxfMediaInfo,
   type PlayerInfo,
   type PlayerStatus,
+  type PlaybackMode,
+  type PlayerDiagnostics,
 } from "@openmxf/h422-player";
 
 const statusLabels: Record<PlayerStatus, string> = {
@@ -16,6 +18,7 @@ const statusLabels: Record<PlayerStatus, string> = {
   paused: "一時停止中",
   ended: "再生終了",
   error: "エラー",
+  buffering: "バッファリング中",
 };
 
 const obtained = (value: string | number | undefined) => value ?? "未取得";
@@ -39,6 +42,8 @@ export function App() {
   const [mediaInfo, setMediaInfo] = useState<MxfMediaInfo>();
   const [timecode, setTimecode] = useState<string | null>(null);
   const [seeking, setSeeking] = useState(false);
+  const [mode,setMode]=useState<PlaybackMode>("legacy");
+  const [diagnostics,setDiagnostics]=useState<PlayerDiagnostics>();
   const selectedStartTimecode = mediaInfo?.selectedTimecode
     ? formatTimecodeFrame(mediaInfo.selectedTimecode.startFrame, mediaInfo.selectedTimecode.roundedTimecodeBase, mediaInfo.selectedTimecode.dropFrame)
     : undefined;
@@ -82,6 +87,7 @@ export function App() {
       </header>
 
       <section className="panel file-panel">
+        <label>再生方式 <select value={mode} onChange={event=>setMode(event.target.value as PlaybackMode)}><option value="legacy">legacy（安定版）</option><option value="streaming">streaming（実験的）</option></select></label>
         <label className="file-picker">
           <span>MXFファイルを選択</span>
           <input type="file" accept=".mxf,application/mxf" onChange={(event) => selectFile(event.target.files?.[0])} />
@@ -92,11 +98,13 @@ export function App() {
       <section className="viewer" aria-label="MXF player">
         {file ? (
           <H422Player
-            key={`${file.name}-${file.lastModified}`}
+            key={`${file.name}-${file.lastModified}-${mode}`}
             ref={playerRef}
             src={file}
             controls={false}
             libavBase="/libav"
+            mode={mode}
+            onDiagnostics={setDiagnostics}
             onReady={setInfo}
             onMediaInfo={setMediaInfo}
             onTimecode={setTimecode}
@@ -152,6 +160,7 @@ export function App() {
           </dl>
         </div>
         <div className="panel error-panel"><h2>エラー</h2><p>{error || "エラーはありません"}</p></div>
+        <div className="panel"><h2>Streaming診断</h2><p>方式: {mode}</p><p>ファイル: {diagnostics?.fileSize??0} bytes</p><p>Reader: {diagnostics?.bytesLoaded??0} bytes / {diagnostics?.underlyingReadCount??0} reads</p><p>キャッシュ: {diagnostics?.cacheBytes??0} bytes</p><p>映像キュー: {diagnostics?.videoQueueFrames??0} frames ({diagnostics?.videoQueueStart?.toFixed(2)??"-"}–{diagnostics?.videoQueueEnd?.toFixed(2)??"-"}s)</p><p>音声区間: {diagnostics?.scheduledAudioRanges??0}</p><p>世代: load {diagnostics?.loadGeneration??0} / seek {diagnostics?.seekGeneration??0}</p></div>
       </section>
     </main>
   );
