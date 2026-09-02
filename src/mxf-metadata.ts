@@ -13,7 +13,7 @@ export interface MxfMediaInfo {
     frameRateNumerator?: number; frameRateDenominator?: number;
     aspectRatio?: string; pixelFormat?: string; durationFrames?: number;
   };
-  audio?: { codec?: string; sampleRate?: number; channels?: number; bitsPerSample?: number };
+  audio?: { codec?: string; essenceCodingUl?: string; sampleRate?: number; channels?: number; bitsPerSample?: number; blockAlign?: number };
   /** Inspection summaries; these are derived from parsed structures, never playback fallbacks. */
   timecodeTrackCount: number;
   selectedTimecode?: MxfTimecodeInfo;
@@ -82,8 +82,8 @@ export function parseMxfMetadataKlv(result: MxfMetadataResult, key: Uint8Array, 
     if (startTc && base && drop) result.timecodes.push({ startFrame: i64(startTc), roundedTimecodeBase: u16(base), dropFrame: drop[0] !== 0, editRateNumerator: rate?.[0] ?? 0, editRateDenominator: rate?.[1] ?? 0, durationFrames: fields.get(0x0202) ? i64(fields.get(0x0202)!) : undefined });
     const width = fields.get(0x3203), height = fields.get(0x3202), aspect = rational(fields.get(0x320e));
     if (width || height || aspect) result.mediaInfo.video = { ...result.mediaInfo.video, width: width ? u32(width) : undefined, height: height ? u32(height) : undefined, aspectRatio: aspect ? `${aspect[0]}:${aspect[1]}` : undefined };
-    const sampleRate = rational(fields.get(0x3d03)), channels = fields.get(0x3d07), bits = fields.get(0x3d01);
-    if (sampleRate || channels || bits) result.mediaInfo.audio = { ...result.mediaInfo.audio, sampleRate: sampleRate ? sampleRate[0] / sampleRate[1] : undefined, channels: channels ? u32(channels) : undefined, bitsPerSample: bits ? u32(bits) : undefined };
+    const sampleRate = rational(fields.get(0x3d03)), channels = fields.get(0x3d07), bits = fields.get(0x3d01), coding=fields.get(0x3d06), blockAlign=fields.get(0x3d0a);
+    if (sampleRate || channels || bits || coding || blockAlign) result.mediaInfo.audio = { ...result.mediaInfo.audio, essenceCodingUl:coding?text(coding):undefined, sampleRate: sampleRate ? sampleRate[0] / sampleRate[1] : undefined, channels: channels ? u32(channels) : undefined, bitsPerSample: bits ? u32(bits) : undefined, blockAlign:blockAlign?u16(blockAlign):undefined };
     const essence = fields.get(0x3004); if (essence) result.mediaInfo.essenceContainer = text(essence);
     const duration = fields.get(0x3002); if (duration) result.mediaInfo.durationFrames = i64(duration);
   }

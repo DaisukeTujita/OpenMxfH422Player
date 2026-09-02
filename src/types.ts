@@ -9,6 +9,7 @@ export interface PlayerDiagnostics {
   audioSampleRate: number | null; audioChannels: number | null; audioQueueStart: number | null;
   audioQueueEnd: number | null; audioVideoDriftMs: number | null; audioBytesLoaded: number;
   audioQueuedThroughTime: number; audioExhausted: boolean; lastPlayableAudioTime: number | null;
+  audioFormatBasis: "metadata-plus-xdcam-inference" | "xdcam-profile-inference" | null;
 }
 
 export interface PlayerInfo {
