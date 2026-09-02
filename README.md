@@ -1,6 +1,6 @@
 # H422Player
 
-## メタデータの部分読み込み（PR 2）
+## ReaderベースのMXF索引
 
 MXFメタデータ、Partition Pack、Random Index Pack、Index Table Segmentの調査は
 `RandomAccessReader`を使用します。ローカルの`File`/`Blob`は`Blob.slice()`で
@@ -11,9 +11,23 @@ MXFメタデータ、Partition Pack、Random Index Pack、Index Table Segmentの
 有効なRIPがある場合は全域を順次走査せず、RIPが示す各Partition Packと、
 Partition Pack直後の`HeaderByteCount`および`IndexByteCount`範囲だけを解析します。
 
-これは**ストリーミング再生対応ではありません**。映像・音声デコードの互換経路は
-メタデータ調査後にまだファイル全体の連続バッファを作るため、プレイヤー全体の
-メモリ問題は未解消です。次のPR 3でEssenceデコードとシークをReaderへ接続します。
+メタデータ解析に続き、Essence KLVもValueを読まずにBER Lengthで読み飛ばして索引化します。
+索引にはKLV/value offset、value length、track number、BodySID、映像・音声種別、
+edit unit、presentation time、所属Partition、および利用可能なIndex Entry情報を保持します。
+`readEssenceRange()`は指定フレーム範囲だけを最大4 MiB単位で読み、Index Entryの
+KeyFrameOffset/RAPを優先して復号開始点を決めます。Index情報がない場合の既定prerollは45フレームです。
+
+現段階でReaderベースになった処理はmetadata/index解析、および公開されたEssence索引・
+区間取得APIです。PlayerEngineはまだEssence索引を作成・利用しません。既存OP1a/XDCAM HD422の
+連続再生互換性を維持するため、PlayerEngineのデコード入力生成、全尺RGBAフレーム、全尺PCMは
+まだ全体読み込み経路です。初回・seek区間デコードと継続再生バッファ補充をReader APIへ接続し、
+固定長キューにする作業は次PRに残ります。
+
+索引処理はEssence Valueを個別の`Uint8Array`として生成しないため、ピークメモリを抑えます。
+ただし`FileRandomAccessReader`は既定で1 MiB単位のアライン済みチャンクを読むため、KLV間隔が
+チャンクより短いファイルでは、ヘッダー走査だけでも物理I/Oがファイルの大部分に及ぶ可能性が
+あります。「常にファイル全体より少ないI/O」は保証しません。HTTP Range向けの小さなヘッダー
+キャッシュ／Reader設計とPlayerEngineの区間デコード接続は次段階の対象です。
 
 React向けのブラウザ完結型 **MXF OP1a / MPEG-2 422P@HL** プレイヤーです。MPEG-2をWebCodecsへ渡さず、専用構成のlibav.js WebAssemblyでデコードし、yuv422pをRGBAへ変換してCanvas（WebGL）へ表示します。48 kHz / 24-bit PCMはplanar `Float32Array`へ変換してWeb Audio APIで再生します。
 
@@ -82,7 +96,7 @@ Stream OffsetはJavaScriptの安全な整数範囲に丸めず `bigint` で保�
 
 ## 読み込み・メモリ設計と段階的移行
 
-現時点のフローは「ファイル全体を `ArrayBuffer` 化 → KLV走査 → 全映像・音声デコード」です。この解析PRだけでは大容量ファイルのメモリ問題はまだ解消していません。次の段階で `RandomAccessReader`（`File.slice()`、AbortSignal、重複要求抑止、LRUチャンクキャッシュ）を導入し、その後に固定長デコードキューと世代付きシークへ切り替えます。予定する既定値は、最大単一read 4 MiB、キャッシュ64 MiB、映像先読み4秒、音声先読み2秒です。シーク時には旧世代のpacket、表示待ちframe、音声bufferを破棄し、ファイルサイズに比例してメモリが増えない構成にします。これらの上限は**設計予定値であり、現実装の保証値ではありません**。
+索引と`readEssenceRange()`はファイルサイズではなくKLV packet数と対象区間に比例します。最大単一readは4 MiB、キャッシュは64 MiB、Indexがない場合のprerollは45フレームです。PlayerEngineにはloadGeneration/AbortSignalに加えてseek専用AbortControllerと世代番号があり、古いseekの完了通知を抑止します。ただし現在の再生デコード互換経路は依然「ファイル全体を `ArrayBuffer` 化 → 全映像・音声デコード」で、長尺素材のピークメモリはまだ解消していません。
 
 Index Tableがない場合はBody Partition/KLVの既知位置、または先頭から順次走査する安全なフォールバックを使用する予定です。未対応形式はDescriptor情報を含む理解可能なエラーにする予定ですが、現エンジンが受理する範囲は下記の既存形式に限られます。
 

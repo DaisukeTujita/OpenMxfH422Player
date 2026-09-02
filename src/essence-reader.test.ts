@@ -1,0 +1,29 @@
+import { describe, expect, it } from "vitest";
+import { DEFAULT_ESSENCE_PREROLL_FRAMES, essenceDecodeStart, indexMxfEssence, readEssenceRange, type EssenceIndex } from "./essence-reader";
+import type { RandomAccessReader } from "./random-access-reader";
+import { FileRandomAccessReader } from "./random-access-reader";
+import type { MxfIndexTable } from "./mxf-index";
+
+const essenceKey = (type: number, track = 1) => new Uint8Array([6,14,43,52,1,2,1,1,13,1,3,1,type,track >>> 16,(track >>> 8) & 255,track & 255]);
+const ber = (length: bigint) => { const bytes:number[]=[];for(let value=length;value;value>>=8n)bytes.unshift(Number(value&255n));return length<128n?new Uint8Array([Number(length)]):new Uint8Array([0x80|bytes.length,...bytes]); };
+const header = (key:Uint8Array,length:bigint) => new Uint8Array([...key,...ber(length)]);
+class SparseReader implements RandomAccessReader {
+  requests:Array<{offset:bigint;length:number}>=[];
+  constructor(readonly size:bigint, private regions:Array<{offset:bigint;data:Uint8Array}>){ }
+  async read(offset:bigint,length:number,signal?:AbortSignal){if(signal?.aborted)throw new DOMException("aborted","AbortError");this.requests.push({offset,length});const result=new Uint8Array(length);for(const region of this.regions){const from=offset>region.offset?offset:region.offset,to=offset+BigInt(length)<region.offset+BigInt(region.data.length)?offset+BigInt(length):region.offset+BigInt(region.data.length);if(from<to)result.set(region.data.subarray(Number(from-region.offset),Number(to-region.offset)),Number(from-offset));}return result;}
+}
+class TrackingBlob extends Blob {
+  slices:Array<{start:number;end:number}>=[];
+  override slice(start=0,end=this.size,contentType?:string):Blob { this.slices.push({start,end});return super.slice(start,end,contentType); }
+}
+const table = (bodySid:number|undefined, keyFrameOffset:number):MxfIndexTable => ({bodySid,indexSid:bodySid,editRateNumerator:30,editRateDenominator:1,startPosition:0,duration:1,entries:[{editUnit:0,streamOffset:0n,keyFrameOffset}]});
+function virtualPackets(count:number,valueLength:bigint){const regions:Array<{offset:bigint;data:Uint8Array}>=[];let offset=0n;for(let i=0;i<count;i++){const h=header(essenceKey(0x15),valueLength);regions.push({offset,data:h},{offset:offset+BigInt(h.length),data:new Uint8Array([i+1])});offset+=BigInt(h.length)+valueLength;}return {reader:new SparseReader(offset,regions),regions};}
+
+describe("reader-based essence index",()=>{
+  it("indexes a huge sparse MXF without reading essence values",async()=>{const {reader}=virtualPackets(3,10n*1024n*1024n*1024n);const index=await indexMxfEssence(reader);expect(index.packets).toHaveLength(3);expect(index.packets[1]).toMatchObject({kind:"video",editUnit:1,trackNumber:1});expect(reader.requests.every(request=>request.length<=17&&index.packets.every(packet=>request.offset!==packet.valueOffset))).toBe(true);expect(reader.requests.reduce((sum,r)=>sum+BigInt(r.length),0n)*1_000_000n).toBeLessThan(reader.size);});
+  it("documents that aligned Blob chunks can physically load most of a densely-spaced file",async()=>{const valueLength=300*1024,parts:Uint8Array[]=[];for(let index=0;index<8;index++)parts.push(header(essenceKey(0x15),BigInt(valueLength)),new Uint8Array(valueLength));const blob=new TrackingBlob(parts),reader=new FileRandomAccessReader(blob);await indexMxfEssence(reader);const stats=reader.getStats();expect(stats.bytesLoaded).toBeGreaterThan(BigInt(blob.size)*9n/10n);expect(stats.underlyingReadCount).toBe(blob.slices.length);expect(stats.largestUnderlyingRead).toBeLessThanOrEqual(1024*1024);});
+  it("associates entries by stream identifiers and leaves ambiguous tables undefined",async()=>{const source=virtualPackets(2,4n),secondOffset=BigInt(source.regions[2].offset);const identified=await indexMxfEssence(source.reader,{partitions:[{offset:0n,kind:"body",bodySid:1,indexSid:1},{offset:secondOffset,kind:"body",bodySid:2,indexSid:2}],indexTables:[table(1,-1),table(2,-2)]});expect(identified.packets.map(packet=>packet.keyFrameOffset)).toEqual([-1,-2]);const ambiguous=await indexMxfEssence(virtualPackets(1,4n).reader,{indexTables:[table(undefined,-1),table(undefined,-2)]});expect(ambiguous.packets[0].keyFrameOffset).toBeUndefined();});
+  it("reads only the selected range and respects a read-size limit",async()=>{const {reader}=virtualPackets(8,4n);const index=await indexMxfEssence(reader);reader.requests=[];const packets=await readEssenceRange(reader,index,{startFrame:5,endFrame:6,prerollFrames:1,maxReadSize:2});expect(packets.map(packet=>packet.editUnit)).toEqual([4,5,6]);expect(reader.requests).toHaveLength(6);expect(Math.max(...reader.requests.map(request=>request.length))).toBe(2);expect(reader.requests.every(request=>packets.some(packet=>request.offset>=packet.valueOffset&&request.offset<packet.valueOffset+packet.valueLength))).toBe(true);});
+  it("uses index key-frame offsets and otherwise falls back to bounded preroll",()=>{const index={frameRate:30,partitions:[],packets:Array.from({length:100},(_,editUnit)=>({offset:0n,valueOffset:0n,valueLength:0n,trackNumber:1,kind:"video" as const,editUnit,presentationTime:editUnit/30,...(editUnit===70?{keyFrameOffset:-10}: {})}))} satisfies EssenceIndex;expect(essenceDecodeStart(index,70)).toBe(60);expect(essenceDecodeStart({...index,packets:index.packets.map(packet=>({...packet,keyFrameOffset:undefined}))},70)).toBe(70-DEFAULT_ESSENCE_PREROLL_FRAMES);});
+  it("aborts indexing and range reads",async()=>{const {reader}=virtualPackets(2,4n),controller=new AbortController();controller.abort();await expect(indexMxfEssence(reader,{signal:controller.signal})).rejects.toMatchObject({name:"AbortError"});const index=await indexMxfEssence(reader);await expect(readEssenceRange(reader,index,{startFrame:0,endFrame:1,signal:controller.signal})).rejects.toMatchObject({name:"AbortError"});});
+});
