@@ -5,6 +5,9 @@ export interface PlayerDiagnostics {
   mode: PlaybackMode; fileSize: number; bytesLoaded: number; underlyingReadCount: number;
   cacheBytes: number; videoQueueFrames: number; videoQueueStart: number | null;
   videoQueueEnd: number | null; scheduledAudioRanges: number; loadGeneration: number; seekGeneration: number;
+  streamingAudioSupported: boolean; selectedAudioTrackNumber: number | null;
+  audioSampleRate: number | null; audioChannels: number | null; audioQueueStart: number | null;
+  audioQueueEnd: number | null; audioVideoDriftMs: number | null; audioBytesLoaded: number;
 }
 
 export interface PlayerInfo {
