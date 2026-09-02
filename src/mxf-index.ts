@@ -8,6 +8,9 @@ export interface MxfIndexEntry {
 }
 
 export interface MxfIndexTable {
+  /** Partition identifiers, when the reader can associate the segment unambiguously. */
+  bodySid?: number;
+  indexSid?: number;
   editRateNumerator: number;
   editRateDenominator: number;
   startPosition: number;

@@ -17,11 +17,17 @@ edit unit、presentation time、所属Partition、および利用可能なIndex 
 `readEssenceRange()`は指定フレーム範囲だけを最大4 MiB単位で読み、Index Entryの
 KeyFrameOffset/RAPを優先して復号開始点を決めます。Index情報がない場合の既定prerollは45フレームです。
 
-現段階でReaderベースになった処理はmetadata/index解析、Essence索引作成、および公開された
-区間取得APIです。プレイヤーはロード時にこの索引を作成します。一方、既存OP1a/XDCAM HD422の
+現段階でReaderベースになった処理はmetadata/index解析、および公開されたEssence索引・
+区間取得APIです。PlayerEngineはまだEssence索引を作成・利用しません。既存OP1a/XDCAM HD422の
 連続再生互換性を維持するため、PlayerEngineのデコード入力生成、全尺RGBAフレーム、全尺PCMは
 まだ全体読み込み経路です。初回・seek区間デコードと継続再生バッファ補充をReader APIへ接続し、
 固定長キューにする作業は次PRに残ります。
+
+索引処理はEssence Valueを個別の`Uint8Array`として生成しないため、ピークメモリを抑えます。
+ただし`FileRandomAccessReader`は既定で1 MiB単位のアライン済みチャンクを読むため、KLV間隔が
+チャンクより短いファイルでは、ヘッダー走査だけでも物理I/Oがファイルの大部分に及ぶ可能性が
+あります。「常にファイル全体より少ないI/O」は保証しません。HTTP Range向けの小さなヘッダー
+キャッシュ／Reader設計とPlayerEngineの区間デコード接続は次段階の対象です。
 
 React向けのブラウザ完結型 **MXF OP1a / MPEG-2 422P@HL** プレイヤーです。MPEG-2をWebCodecsへ渡さず、専用構成のlibav.js WebAssemblyでデコードし、yuv422pをRGBAへ変換してCanvas（WebGL）へ表示します。48 kHz / 24-bit PCMはplanar `Float32Array`へ変換してWeb Audio APIで再生します。
 

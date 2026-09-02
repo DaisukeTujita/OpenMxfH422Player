@@ -15,6 +15,7 @@ export interface EssenceIndexEntry {
 export interface EssenceIndex { packets: EssenceIndexEntry[]; partitions: MxfPartitionInfo[]; frameRate: number }
 export interface EssenceRangeOptions { startFrame: number; endFrame: number; prerollFrames?: number; signal?: AbortSignal; maxReadSize?: number; kinds?: Array<EssenceIndexEntry["kind"]> }
 export interface ReadEssencePacket extends EssenceIndexEntry { data: Uint8Array }
+type EntryLookup = Map<number, MxfIndexTable["entries"][number]>;
 
 const hex = (data: Uint8Array) => Array.from(data, value => value.toString(16).padStart(2, "0")).join("");
 function essenceKind(key: Uint8Array): EssenceIndexEntry["kind"] | undefined {
@@ -27,11 +28,28 @@ function partitionFor(offset: bigint, partitions: MxfPartitionInfo[]): MxfPartit
   return found;
 }
 
+function uniqueTablesBy(tables: MxfIndexTable[], field: "bodySid" | "indexSid"): Map<number, MxfIndexTable> {
+  const result = new Map<number, MxfIndexTable>(), ambiguous = new Set<number>();
+  for (const table of tables) {
+    const value = table[field]; if (value === undefined) continue;
+    if (result.has(value)) { result.delete(value); ambiguous.add(value); }
+    else if (!ambiguous.has(value)) result.set(value, table);
+  }
+  return result;
+}
+
+function indexLookups(tables: MxfIndexTable[]) {
+  const entries = new Map<MxfIndexTable, EntryLookup>();
+  for (const table of tables) entries.set(table, new Map(table.entries.map(entry => [entry.editUnit, entry])));
+  return { entries, byBodySid: uniqueTablesBy(tables, "bodySid"), byIndexSid: uniqueTablesBy(tables, "indexSid"), sole: tables.length === 1 ? tables[0] : undefined };
+}
+
 /** Builds a lightweight KLV map. Values are skipped using BER lengths and are never read. */
 export async function indexMxfEssence(reader: RandomAccessReader, options: { partitions?: MxfPartitionInfo[]; indexTables?: MxfIndexTable[]; frameRate?: number; signal?: AbortSignal } = {}): Promise<EssenceIndex> {
   const partitions = [...(options.partitions ?? [])].sort((a, b) => a.offset < b.offset ? -1 : 1);
   const frameRate = options.frameRate ?? 30000 / 1001, packets: EssenceIndexEntry[] = [];
-  const counts = { video: 0, audio: 0, unknown: 0 };
+  const lookups = indexLookups(options.indexTables ?? []);
+  const counts = new Map<string, number>();
   let offset = 0n;
   while (offset < reader.size) {
     if (options.signal?.aborted) throw abortError();
@@ -39,9 +57,21 @@ export async function indexMxfEssence(reader: RandomAccessReader, options: { par
     try { header = await readKlvHeader(reader, offset, options.signal); } catch (error) { if ((error as Error).name === "AbortError") throw error; break; }
     const kind = essenceKind(header.key);
     if (kind) {
-      const editUnit = counts[kind]++, tableEntry = options.indexTables?.flatMap(table => table.entries).find(entry => entry.editUnit === editUnit);
       const owner = partitionFor(offset, partitions);
-      packets.push({ offset, valueOffset: header.valueOffset, valueLength: header.valueLength, trackNumber: header.key[13] * 0x10000 + header.key[14] * 0x100 + header.key[15], bodySID: owner?.bodySid, kind, editUnit, presentationTime: editUnit / frameRate, partition: owner, keyFrameOffset: tableEntry?.keyFrameOffset, temporalOffset: tableEntry?.temporalOffset, flags: tableEntry?.flags, isRandomAccessPoint: tableEntry?.isRandomAccessPoint });
+      const trackNumber = header.key[13] * 0x10000 + header.key[14] * 0x100 + header.key[15];
+      const streamKey = `${owner?.bodySid ?? "?"}:${kind}:${trackNumber}`;
+      const editUnit = counts.get(streamKey) ?? 0; counts.set(streamKey, editUnit + 1);
+      // MXF Index Tables describe picture edit units here. Never attach an ambiguous
+      // table (or a picture table to sound); missing data deliberately uses preroll.
+      const soleMatches = lookups.sole &&
+        (lookups.sole.bodySid === undefined || lookups.sole.bodySid === owner?.bodySid) &&
+        (lookups.sole.indexSid === undefined || lookups.sole.indexSid === owner?.indexSid);
+      const table = kind === "video" ?
+        (owner?.bodySid !== undefined ? lookups.byBodySid.get(owner.bodySid) : undefined) ??
+        (owner?.indexSid !== undefined ? lookups.byIndexSid.get(owner.indexSid) : undefined) ??
+        (soleMatches ? lookups.sole : undefined) : undefined;
+      const tableEntry = table ? lookups.entries.get(table)?.get(editUnit) : undefined;
+      packets.push({ offset, valueOffset: header.valueOffset, valueLength: header.valueLength, trackNumber, bodySID: owner?.bodySid, kind, editUnit, presentationTime: editUnit / frameRate, partition: owner, keyFrameOffset: tableEntry?.keyFrameOffset, temporalOffset: tableEntry?.temporalOffset, flags: tableEntry?.flags, isRandomAccessPoint: tableEntry?.isRandomAccessPoint });
     }
     if (header.nextOffset <= offset) throw new Error("Invalid zero-length KLV progression");
     offset = header.nextOffset;

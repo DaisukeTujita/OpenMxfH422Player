@@ -37,12 +37,19 @@ function checkedEnd(start: bigint, length: bigint, size: bigint, label: string):
   return start + length;
 }
 
-async function parseRange(reader: RandomAccessReader, start: bigint, end: bigint, result: MxfMetadataResult, rates: Array<readonly [number, number]>, max: number, signal?: AbortSignal): Promise<void> {
+async function parseRange(reader: RandomAccessReader, start: bigint, end: bigint, result: MxfMetadataResult, rates: Array<readonly [number, number]>, max: number, signal?: AbortSignal, owner?: MxfPartitionInfo): Promise<void> {
   let offset = start;
   while (offset < end) {
     const header = await readKlvHeader(reader, offset, signal);
     if (header.nextOffset > end) throw new Error("KLV exceeds declared partition range");
-    if (isMetadata(header.key) && header.valueLength <= BigInt(max)) parseMxfMetadataKlv(result, header.key, await readKlvValue(reader, header, max, signal), rates);
+    if (isMetadata(header.key) && header.valueLength <= BigInt(max)) {
+      const previousTableCount = result.indexTables.length;
+      parseMxfMetadataKlv(result, header.key, await readKlvValue(reader, header, max, signal), rates);
+      for (let index = previousTableCount; index < result.indexTables.length; index++) {
+        result.indexTables[index].bodySid = owner?.bodySid;
+        result.indexTables[index].indexSid = owner?.indexSid;
+      }
+    }
     offset = header.nextOffset;
   }
 }
@@ -56,8 +63,8 @@ async function parseFromRip(reader: RandomAccessReader, offsets: bigint[], resul
     partitions.push(info); parseMxfMetadataKlv(result, header.key, value, rates);
     const headerEnd = checkedEnd(header.nextOffset, info.headerByteCount ?? 0n, reader.size, "Header Metadata");
     const indexEnd = checkedEnd(headerEnd, info.indexByteCount ?? 0n, reader.size, "Index");
-    if (info.headerByteCount) await parseRange(reader, header.nextOffset, headerEnd, result, rates, max, signal);
-    if (info.indexByteCount) await parseRange(reader, headerEnd, indexEnd, result, rates, max, signal);
+    if (info.headerByteCount) await parseRange(reader, header.nextOffset, headerEnd, result, rates, max, signal, info);
+    if (info.indexByteCount) await parseRange(reader, headerEnd, indexEnd, result, rates, max, signal, info);
   }
   return partitions;
 }

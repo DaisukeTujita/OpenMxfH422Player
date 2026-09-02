@@ -5,7 +5,6 @@ import { pcmS24beToFloat32, XDCAM_FRAME_RATE, yuv422pToRgba } from "./media";
 import { timecodeAtSeconds, type MxfTimecodeInfo } from "./timecode";
 import type { PlayerInfo, PlayerStatus } from "./types";
 import { WebGlRenderer } from "./webgl";
-import { indexMxfEssence, type EssenceIndex } from "./essence-reader";
 
 interface Callbacks { status(s: PlayerStatus): void; ready(i: PlayerInfo): void; time(t: number): void; error(e: Error): void; mediaInfo?(i: import("./mxf-metadata").MxfMediaInfo): void; timecode?(value: string | null): void; seeking?(value: boolean): void }
 type LibAV = Record<string, any>;
@@ -14,14 +13,12 @@ type RenderFrame = {frame: ImageData; time: number};
 export interface PlayerEngineDependencies {
   createReader(blob: Blob): RandomAccessReader & {destroy():void};
   parseMetadata(reader: RandomAccessReader, signal: AbortSignal): ReturnType<typeof parseMxfMetadataFromReader>;
-  indexEssence?(reader: RandomAccessReader, metadata: Awaited<ReturnType<typeof parseMxfMetadataFromReader>>, signal: AbortSignal): Promise<EssenceIndex>;
   readWhole(blob: Blob): Promise<Uint8Array>;
   parse(bytes: Uint8Array): ParsedMxf;
   loadLibav(base: string): Promise<LibAV>;
 }
 const defaultDependencies: PlayerEngineDependencies = {
   createReader: blob=>new FileRandomAccessReader(blob), parseMetadata:(reader,signal)=>parseMxfMetadataFromReader(reader,{signal}),
-  indexEssence:(reader,metadata,signal)=>indexMxfEssence(reader,{partitions:metadata.partitions,indexTables:metadata.indexTables,frameRate:metadata.mediaInfo.editRateNumerator&&metadata.mediaInfo.editRateDenominator?metadata.mediaInfo.editRateNumerator/metadata.mediaInfo.editRateDenominator:undefined,signal}),
   readWhole:async blob=>new Uint8Array(await blob.slice(0,blob.size).arrayBuffer()), parse:parseMxf, loadLibav:loadCustomLibAV,
 };
 
@@ -91,7 +88,7 @@ export class PlayerEngine {
       if(!current())return;
       const reader=this.dependencies.createReader(blob);
       let metadata;
-      try { metadata=await this.dependencies.parseMetadata(reader,signal);if(current()&&this.dependencies.indexEssence)await this.dependencies.indexEssence(reader,metadata,signal); }
+      try { metadata=await this.dependencies.parseMetadata(reader,signal); }
       finally { reader.destroy(); }
       if(!current())return;
       const timecodeInfo=selectTimecodeTrack(metadata.timecodes);
