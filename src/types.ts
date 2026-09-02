@@ -10,6 +10,10 @@ export interface PlayerDiagnostics {
   audioQueueEnd: number | null; audioVideoDriftMs: number | null; audioBytesLoaded: number;
   audioQueuedThroughTime: number; audioExhausted: boolean; lastPlayableAudioTime: number | null;
   audioFormatBasis: "metadata-plus-xdcam-inference" | "xdcam-profile-inference" | null;
+  requestedTimecode?: string | null; requestedFrame?: number | null; actualDisplayedFrame?: number | null;
+  seekStartFrame?: number | null; prerollFrames?: number; seekSource?: "index" | "sequential-fallback" | null;
+  seekReadBytes?: number; seekElapsedMs?: number | null; selectedTimecodeTrack?: "material" | "source" | "unresolved" | null;
+  timecodeSelectionReason?: string;
 }
 
 export interface PlayerInfo {
@@ -25,6 +29,8 @@ export interface H422PlayerHandle {
   play(): Promise<void>;
   pause(): void;
   seek(seconds: number): Promise<void>;
+  /** Seek to an exact media frame represented by an MXF timecode label. */
+  seekTimecode(timecode: string): Promise<void>;
   readonly currentTime: number;
   readonly duration: number;
   getDiagnostics(): PlayerDiagnostics;

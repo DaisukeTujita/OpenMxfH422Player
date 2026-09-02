@@ -6,50 +6,66 @@ export interface MxfTimecodeInfo {
   editRateDenominator: number;
   durationFrames?: number;
   packageKind?: "material" | "source";
+  /** True only when package ownership was resolved from structural metadata. */
+  packageReferenceResolved?: boolean;
+  source?: "mxf" | "inferred";
 }
 
-function two(value: number): string {
-  return Math.floor(value).toString().padStart(2, "0");
-}
+export type TimecodeConversionError = "invalid-format" | "invalid-frame-number" | "invalid-drop-frame-number" | "out-of-range";
+export interface TimecodePosition { timecode: string; mediaFrame: number; mediaSeconds: number }
 
-/** Convert an absolute timecode frame number, wrapping at the SMPTE 24-hour boundary. */
-export function formatTimecodeFrame(frame: number, base: number, dropFrame = false): string {
-  if (!Number.isInteger(base) || base <= 0) throw new Error("Timecode base must be a positive integer");
-  const framesPerDay = base * 60 * 60 * 24 - (dropFrame ? dropFramesPerMinute(base) * (24 * 60 - 24 * 6) : 0);
-  let value = Math.trunc(frame) % framesPerDay;
-  if (value < 0) value += framesPerDay;
-
-  if (dropFrame) {
-    const dropped = dropFramesPerMinute(base);
-    const framesPer10Minutes = base * 60 * 10 - dropped * 9;
-    const framesPerMinute = base * 60 - dropped;
-    const tenMinuteBlocks = Math.floor(value / framesPer10Minutes);
-    const remainder = value % framesPer10Minutes;
-    // The first minute in each ten-minute block does not drop frame numbers.
-    value += dropped * 9 * tenMinuteBlocks;
-    if (remainder >= base * 60) value += dropped * Math.floor((remainder - base * 60) / framesPerMinute + 1);
-  }
-
-  const ff = value % base;
-  const seconds = Math.floor(value / base);
-  const ss = seconds % 60;
-  const minutes = Math.floor(seconds / 60);
-  const mm = minutes % 60;
-  const hh = Math.floor(minutes / 60) % 24;
-  return `${two(hh)}:${two(mm)}:${two(ss)}${dropFrame ? ";" : ":"}${two(ff)}`;
-}
-
-function dropFramesPerMinute(base: number): number {
+const two = (value: number) => Math.floor(value).toString().padStart(2, "0");
+const droppedPerMinute = (base: number) => {
   if (base === 30) return 2;
   if (base === 60) return 4;
-  throw new Error("Drop-frame timecode is supported only for 29.97 and 59.94 fps");
+  throw new Error("Drop-frame timecode requires nominal 30 or 60 fps");
+};
+export const framesPerTimecodeDay = (base: number, drop: boolean) => base * 86400 - (drop ? droppedPerMinute(base) * 1296 : 0);
+
+/** Format a zero-based SMPTE frame count; negative and >24-hour values wrap. */
+export function formatTimecodeFrame(frame: number, base: number, dropFrame = false): string {
+  if (!Number.isInteger(base) || base <= 0) throw new Error("Timecode base must be a positive integer");
+  const day = framesPerTimecodeDay(base, dropFrame);
+  let count = Math.trunc(frame) % day;
+  if (count < 0) count += day;
+  let label = count;
+  if (dropFrame) {
+    const drop = droppedPerMinute(base), per10 = base * 600 - drop * 9, perMinute = base * 60 - drop;
+    const blocks = Math.floor(count / per10), remainder = count % per10;
+    label += blocks * drop * 9;
+    if (remainder >= base * 60) label += drop * (Math.floor((remainder - base * 60) / perMinute) + 1);
+  }
+  const ff = label % base, totalSeconds = Math.floor(label / base);
+  return `${two(Math.floor(totalSeconds / 3600) % 24)}:${two(Math.floor(totalSeconds / 60) % 60)}:${two(totalSeconds % 60)}${dropFrame ? ";" : ":"}${two(ff)}`;
 }
 
-export function timecodeAtFrame(info: MxfTimecodeInfo, playbackFrame: number): string {
-  return formatTimecodeFrame(info.startFrame + Math.max(0, Math.trunc(playbackFrame)), info.roundedTimecodeBase, info.dropFrame);
+/** Parse an SMPTE label to its absolute frame count within a 24-hour day. */
+export function parseTimecodeFrame(value: string, base: number, dropFrame: boolean): number {
+  const match = /^(\d{2}):(\d{2}):(\d{2})([:;])(\d{2})$/.exec(value);
+  if (!match || (dropFrame ? match[4] !== ";" : match[4] !== ":")) throw new Error("invalid-format" satisfies TimecodeConversionError);
+  const hh=Number(match[1]), mm=Number(match[2]), ss=Number(match[3]), ff=Number(match[5]);
+  if (hh > 23 || mm > 59 || ss > 59 || ff >= base) throw new Error("invalid-frame-number" satisfies TimecodeConversionError);
+  const label=((hh*60+mm)*60+ss)*base+ff;
+  if (!dropFrame) return label;
+  const drop=droppedPerMinute(base), totalMinutes=hh*60+mm;
+  if (mm % 10 !== 0 && ss === 0 && ff < drop) throw new Error("invalid-drop-frame-number" satisfies TimecodeConversionError);
+  return label-drop*(totalMinutes-Math.floor(totalMinutes/10));
 }
 
-export function timecodeAtSeconds(info: MxfTimecodeInfo, seconds: number): string {
-  const frame = Math.floor(Math.max(0, seconds) * info.editRateNumerator / info.editRateDenominator);
-  return timecodeAtFrame(info, frame);
+function validate(info:MxfTimecodeInfo) {
+  if (info.editRateNumerator <= 0 || info.editRateDenominator <= 0) throw new Error("invalid-edit-rate");
 }
+export function mediaFrameToTimecode(info:MxfTimecodeInfo, mediaFrame:number):string { validate(info); return formatTimecodeFrame(info.startFrame+Math.trunc(mediaFrame),info.roundedTimecodeBase,info.dropFrame); }
+export function mediaSecondsToTimecode(info:MxfTimecodeInfo, seconds:number):string { validate(info); return mediaFrameToTimecode(info,Math.floor(Math.max(0,seconds)*info.editRateNumerator/info.editRateDenominator)); }
+export function timecodeToMediaFrame(info:MxfTimecodeInfo,value:string):number {
+  validate(info); const absolute=parseTimecodeFrame(value,info.roundedTimecodeBase,info.dropFrame), day=framesPerTimecodeDay(info.roundedTimecodeBase,info.dropFrame);
+  const frame=(absolute-(info.startFrame%day)+day)%day;
+  if (info.durationFrames !== undefined && frame >= info.durationFrames) throw new Error("out-of-range" satisfies TimecodeConversionError);
+  return frame;
+}
+export function timecodeToMediaSeconds(info:MxfTimecodeInfo,value:string):number { return timecodeToMediaFrame(info,value)*info.editRateDenominator/info.editRateNumerator; }
+export function resolveTimecodePosition(info:MxfTimecodeInfo,value:string):TimecodePosition { const mediaFrame=timecodeToMediaFrame(info,value); return {timecode:formatTimecodeFrame(parseTimecodeFrame(value,info.roundedTimecodeBase,info.dropFrame),info.roundedTimecodeBase,info.dropFrame),mediaFrame,mediaSeconds:mediaFrame*info.editRateDenominator/info.editRateNumerator}; }
+
+// Backwards-compatible names.
+export function timecodeAtFrame(info:MxfTimecodeInfo, playbackFrame:number):string { return mediaFrameToTimecode(info,Math.max(0,Math.trunc(playbackFrame))); }
+export const timecodeAtSeconds=mediaSecondsToTimecode;

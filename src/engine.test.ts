@@ -117,6 +117,15 @@ describe("PlayerEngine decoder cleanup", () => {
   });
 });
 
+describe("selectTimecodeTrack package priority", () => {
+  it("prefers a resolved Material Package and excludes invalid rates",()=>{
+    const invalid={startFrame:0,roundedTimecodeBase:25,dropFrame:false,editRateNumerator:0,editRateDenominator:1,packageKind:"material" as const,packageReferenceResolved:true};
+    const source={...invalid,startFrame:10,editRateNumerator:25,packageKind:"source" as const};
+    const material={...source,startFrame:20,packageKind:"material" as const};
+    expect(selectTimecodeTrack([invalid,source,material])).toBe(material);
+  });
+});
+
 describe("selectTimecodeTrack", () => {
   const first = { startFrame: 100, roundedTimecodeBase: 30, dropFrame: false, editRateNumerator: 30000, editRateDenominator: 1001 };
   const second = { startFrame: 200, roundedTimecodeBase: 30, dropFrame: true, editRateNumerator: 30000, editRateDenominator: 1001 };

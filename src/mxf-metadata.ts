@@ -17,6 +17,7 @@ export interface MxfMediaInfo {
   /** Inspection summaries; these are derived from parsed structures, never playback fallbacks. */
   timecodeTrackCount: number;
   selectedTimecode?: MxfTimecodeInfo;
+  timecodeSelectionReason?: string;
   indexTableCount: number;
   indexEntryCount: number;
 }
@@ -79,7 +80,7 @@ export function parseMxfMetadataKlv(result: MxfMetadataResult, key: Uint8Array, 
     let fields: Fields; try { fields = localSet(value); } catch { return; }
     const rate = rational(fields.get(0x4b01)); if (rate) editRates.push(rate);
     const startTc = fields.get(0x1501), base = fields.get(0x1502), drop = fields.get(0x1503);
-    if (startTc && base && drop) result.timecodes.push({ startFrame: i64(startTc), roundedTimecodeBase: u16(base), dropFrame: drop[0] !== 0, editRateNumerator: rate?.[0] ?? 0, editRateDenominator: rate?.[1] ?? 0, durationFrames: fields.get(0x0202) ? i64(fields.get(0x0202)!) : undefined });
+    if (startTc && base && drop) result.timecodes.push({ startFrame: i64(startTc), roundedTimecodeBase: u16(base), dropFrame: drop[0] !== 0, editRateNumerator: rate?.[0] ?? 0, editRateDenominator: rate?.[1] ?? 0, durationFrames: fields.get(0x0202) ? i64(fields.get(0x0202)!) : undefined, source: "mxf" });
     const width = fields.get(0x3203), height = fields.get(0x3202), aspect = rational(fields.get(0x320e));
     if (width || height || aspect) result.mediaInfo.video = { ...result.mediaInfo.video, width: width ? u32(width) : undefined, height: height ? u32(height) : undefined, aspectRatio: aspect ? `${aspect[0]}:${aspect[1]}` : undefined };
     const sampleRate = rational(fields.get(0x3d03)), channels = fields.get(0x3d07), bits = fields.get(0x3d01), coding=fields.get(0x3d06), blockAlign=fields.get(0x3d0a);

@@ -22,7 +22,7 @@ describe("parseMxfMetadata", () => {
     const parsed = parseMxfMetadata(descriptor);
     expect(parsed.mediaInfo).toMatchObject({ editRateNumerator: 30000, editRateDenominator: 1001, video: { width: 1920, height: 1080, aspectRatio: "16:9" }, audio: { sampleRate: 48000, channels: 2, bitsPerSample: 24, blockAlign:6, essenceCodingUl:"060e2b34040101010402020101000000" } });
     expect(parsed.mediaInfo.timecodeTrackCount).toBe(1);
-    expect(parsed.timecodes[0]).toEqual({ startFrame: 1_080_000, roundedTimecodeBase: 30, dropFrame: true, editRateNumerator: 30000, editRateDenominator: 1001, durationFrames: 900 });
+    expect(parsed.timecodes[0]).toEqual({ startFrame: 1_080_000, roundedTimecodeBase: 30, dropFrame: true, editRateNumerator: 30000, editRateDenominator: 1001, durationFrames: 900, source: "mxf" });
   });
 
   it("keeps unavailable metadata undefined and accepts files without a Timecode Track", () => {
