@@ -60,20 +60,28 @@ export default function Preview({ file }: { file: File }) {
 ```
 
 `mode` は `"legacy" | "streaming"` で、既定値は安全な `legacy` です。streaming では
-`readWhole()` を呼ばず、初回は約3秒、残量2秒未満で次の約3秒を取得します。表示済みから
+`readWhole()` を呼ばず、1回約3秒の区間を、キューが4秒先まで満たされるよう取得します。
+残量2秒未満で補充を開始し、表示済みから
 1秒より古いRGBAフレームを破棄し、seek時は旧要求をAbortしてseek先付近だけを再取得します。
 `ref.getDiagnostics()` と `onDiagnostics` からReader I/O、キャッシュ、キュー、世代を確認できます。
 
-**現時点の制約:** streaming のPCM区間スケジューリングと厳密なbuffering停止は未対応で、
-streamingでは音声を再生しません。音声を含む完走確認にはlegacyを使用してください。Index Tableの
+**現時点の制約:** streaming のPCM区間スケジューリングは未対応で、
+streamingでは音声を再生しません。映像が枯渇した場合は再生時計を停止してbufferingを通知し、補充後に同じ位置から再開します。音声を含む完走確認にはlegacyを使用してください。Index Tableの
 `StreamOffset`はBodySIDのEssence Container stream先頭を基準とする相対値であり、Partitionの
 絶対位置へ単純加算できません。本実装は推測による直接変換をせず、安全なKLVヘッダー順次索引へ
 フォールバックします。このためEssence Valueのメモリ化は避けますが、初回の物理I/O時間は
 ファイル長に比例し得ます。
 
+入力が `File` / `Blob` の場合は `Blob.slice()` により必要な物理範囲だけを読みます。一方、文字列URLは
+現在 `fetch(url).blob()` でファイル全体をダウンロードした後にReaderを作成します。HTTP Rangeによる
+ネットワークストリーミングは未対応であり、URL指定時の通信量は削減されません。
+
+`PlayerInfo.audioChannels` は「現在再生可能な音声チャンネル数」です。このため映像のみのstreamingでは
+MXF内に音声Essenceが存在しても `0` を返し、音声Essence Value自体も読み込みません。
+
 `src`には`File`、`Blob`、またはCORSを許可したURLを指定できます。`ref`から`play()`、`pause()`、`seek(seconds)`、`currentTime`、`duration`を利用できます。音声はブラウザのautoplay policyにより通常ユーザー操作後に開始します。シーク時はAudioBufferSourceNodeを指定位置から作り直します。
 
-追加コールバックの `onMediaInfo` はMXFから実際に取得できた構造情報を返し、未取得フィールドは `undefined` のままです。`onTimecode` は現在位置のSMPTEタイムコード、Timecode Trackがない場合は `null` を返します。`onSeekingChange` はシーク処理の開始・終了を通知します。`onBufferingChange` は部分読み込みを導入する次段階とのAPI互換用で、現バージョンではまだ通知されません。
+追加コールバックの `onMediaInfo` はMXFから実際に取得できた構造情報を返し、未取得フィールドは `undefined` のままです。`onTimecode` は現在位置のSMPTEタイムコード、Timecode Trackがない場合は `null` を返します。`onSeekingChange` はシーク処理の開始・終了を通知します。`onBufferingChange` はstreaming映像のバッファ枯渇・復旧、およびseek中の準備状態を重複なく通知します。
 
 ## MXF解析
 

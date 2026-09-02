@@ -93,6 +93,7 @@ export function App() {
           <input type="file" accept=".mxf,application/mxf" onChange={(event) => selectFile(event.target.files?.[0])} />
         </label>
         <span className="filename">{file?.name ?? "ファイルが選択されていません"}</span>
+        {mode === "streaming" && <strong>実験的な映像のみモードです（音声は再生されません）</strong>}
       </section>
 
       <section className="viewer" aria-label="MXF player">
