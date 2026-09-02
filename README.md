@@ -1,5 +1,18 @@
 # H422Player
 
+## メタデータの部分読み込み（PR 2）
+
+MXFメタデータ、Partition Pack、Random Index Pack、Index Table Segmentの調査は
+`RandomAccessReader`を使用します。ローカルの`File`/`Blob`は`Blob.slice()`で
+アラインされた範囲だけを読み、既定値は1 MiBチャンク、64 MiBのLRUキャッシュ、
+単一`read()`最大4 MiBです。同一チャンクの同時要求共有、AbortSignal、統計取得に
+対応し、各値は`FileRandomAccessReader`のオプションで変更できます。RIPがない、
+または壊れている場合は、KLV ValueをLengthで読み飛ばす安全な順次走査を行います。
+
+これは**ストリーミング再生対応ではありません**。映像・音声デコードの互換経路は
+メタデータ調査後にまだファイル全体の連続バッファを作るため、プレイヤー全体の
+メモリ問題は未解消です。次のPR 3でEssenceデコードとシークをReaderへ接続します。
+
 React向けのブラウザ完結型 **MXF OP1a / MPEG-2 422P@HL** プレイヤーです。MPEG-2をWebCodecsへ渡さず、専用構成のlibav.js WebAssemblyでデコードし、yuv422pをRGBAへ変換してCanvas（WebGL）へ表示します。48 kHz / 24-bit PCMはplanar `Float32Array`へ変換してWeb Audio APIで再生します。
 
 ## Windows 11（PowerShell）での起動

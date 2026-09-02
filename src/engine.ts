@@ -1,5 +1,6 @@
 import { parseMxf } from "./mxf";
-import { parseMxfMetadata } from "./mxf-metadata";
+import { parseMxfMetadataFromReader } from "./mxf-reader";
+import { FileRandomAccessReader } from "./random-access-reader";
 import { pcmS24beToFloat32, XDCAM_FRAME_RATE, yuv422pToRgba } from "./media";
 import { timecodeAtSeconds, type MxfTimecodeInfo } from "./timecode";
 import type { PlayerInfo, PlayerStatus } from "./types";
@@ -58,20 +59,26 @@ export class PlayerEngine {
   private status: PlayerStatus="idle"; private startedAt=0; private pausedAt=0; private durationValue=0;
   private frames: Array<{frame: ImageData; time: number}>=[]; private raf=0;
   private timecodeInfo?: MxfTimecodeInfo;
+  private loadController?: AbortController; private destroyed=false;
   constructor(canvas: HTMLCanvasElement, private callbacks: Callbacks, private muted=false, private libavBase="/libav") { this.renderer=new WebGlRenderer(canvas); }
   get currentTime(): number { return this.status === "playing" ? Math.min(this.durationValue,(performance.now()-this.startedAt)/1000) : this.pausedAt; }
   get duration(): number { return this.durationValue; }
   private setStatus(s: PlayerStatus) { this.status=s; this.callbacks.status(s); }
   async load(source: File|Blob|string): Promise<void> {
+    this.loadController?.abort(); const controller=new AbortController(); this.loadController=controller; const {signal}=controller;
     this.setStatus("loading");
     try {
-      const blob=typeof source === "string" ? await fetch(source).then(r=>{if(!r.ok)throw new Error(`MXF request failed (${r.status})`);return r.blob();}) : source;
-      const bytes=new Uint8Array(await blob.arrayBuffer());
-      const metadata=parseMxfMetadata(bytes);
+      const blob=typeof source === "string" ? await fetch(source,{signal}).then(r=>{if(!r.ok)throw new Error(`MXF request failed (${r.status})`);return r.blob();}) : source;
+      const reader=new FileRandomAccessReader(blob);
+      const metadata=await parseMxfMetadataFromReader(reader,{signal});
+      if(signal.aborted||this.destroyed)return;
       this.timecodeInfo=selectTimecodeTrack(metadata.timecodes);
       metadata.mediaInfo.selectedTimecode=this.timecodeInfo;
       this.callbacks.mediaInfo?.(metadata.mediaInfo);
       this.callbacks.timecode?.(this.timecodeInfo ? timecodeAtSeconds(this.timecodeInfo,0) : null);
+      // PR 2 compatibility path: decoding still needs one contiguous buffer.
+      const bytes=new Uint8Array(await blob.slice(0,blob.size).arrayBuffer());
+      if(signal.aborted||this.destroyed)return;
       const parsed=parseMxf(bytes);
       console.info(`[H422Player] video codec_id=${parsed.videoCodec.codecId} codec_name=${parsed.videoCodec.codecName}`);
       if (parsed.audioCodec) console.info(`[H422Player] audio codec_id=${parsed.audioCodec.codecId} codec_name=${parsed.audioCodec.codecName}`);
@@ -85,7 +92,7 @@ export class PlayerEngine {
       this.renderer.draw(first.frame,first.frame.width,first.frame.height);
       this.callbacks.ready({width:first.frame.width,height:first.frame.height,frameRate:XDCAM_FRAME_RATE,duration:this.durationValue,audioSampleRate:48000,audioChannels:audio.length?2:0});
       this.setStatus("ready");
-    } catch (e) { const error=e instanceof Error?e:new Error(String(e)); this.setStatus("error"); this.callbacks.error(error); throw error; }
+    } catch (e) { const error=e instanceof Error?e:new Error(String(e)); if(error.name==="AbortError"||signal.aborted)return; this.setStatus("error"); this.callbacks.error(error); throw error; }
   }
   private async decodeVideo(chunks: Uint8Array[], codecId: number): Promise<void> {
     const av=this.libav!;
@@ -129,5 +136,5 @@ export class PlayerEngine {
   private emitTime(t:number){this.callbacks.time(t);this.callbacks.timecode?.(this.timecodeInfo ? timecodeAtSeconds(this.timecodeInfo,t) : null);}
   private drawAt(t:number){const f=this.frames[Math.min(this.frames.length-1,Math.floor(t*XDCAM_FRAME_RATE))];if(f)this.renderer.draw(f.frame,f.frame.width,f.frame.height);}
   private tick=()=>{const t=this.currentTime;this.drawAt(t);this.emitTime(t);if(t>=this.durationValue){this.pausedAt=t;this.setStatus("ended");return;}this.raf=requestAnimationFrame(this.tick);};
-  destroy():void{cancelAnimationFrame(this.raf);this.audioSource?.stop();void this.audio?.close();this.frames=[];}
+  destroy():void{this.destroyed=true;this.loadController?.abort();cancelAnimationFrame(this.raf);this.audioSource?.stop();void this.audio?.close();this.frames=[];}
 }
