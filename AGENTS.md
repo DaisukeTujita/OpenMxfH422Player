@@ -11,3 +11,11 @@ Codex must perform this workflow autonomously for every repository change:
 7. Update the PR body to report actual results and limitations. Never merge into `main`.
 
 Do not request intermediate human approval. Stop and clearly report only authentication/permission/external-service blockers or irreconcilable requirements. Never commit generated MXF, WASM, data, or libav runtime assets.
+
+## Pull request completion rules
+
+- If no target PR exists, create exactly one PR after the work is complete. For an existing PR, push to that same PR branch and never create a replacement PR.
+- Fill every pull request template section with actual results. After pushing, verify Actions for the latest head SHA; only after Actions succeeds, perform the final PR-body update.
+- Review diagnostic values for provenance from actual processing; assigning the requested value is not evidence of the result.
+- Verify requested behavior is implemented, not merely represented by a type, field, or placeholder.
+- Compare every README and PR-body claim with the implementation. Green Actions never replace logic review.

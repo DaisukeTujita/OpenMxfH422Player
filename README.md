@@ -106,13 +106,13 @@ Stream OffsetはJavaScriptの安全な整数範囲に丸めず `bigint` で保�
 
 ### 複数Timecode Trackの選択規則
 
-Package参照を解決できたTrackはMaterial Package、次にSource Packageを優先します。参照が一意に解決できない場合だけ、**MXF内のKLV検出順で最初に現れ、Edit Rateの分子・分母がともに正数であるTrack**を使用します。検出数、選択値、選択理由はログと診断情報で確認できます。
+Preface、ContentStorage、MaterialPackage、SourcePackage、Track、Sequence、SourceClip間の参照解析は未対応です。複数のTimecode Trackでは、**常にMXF内のKLV検出順で最初に現れ、Edit Rateの分子・分母がともに正数であるTrack**を使用します。診断にも「Package参照解析は未対応のためKLV検出順で選択」と明示し、Material Packageであるという未検証の推測は行いません。
 
 サンプルの「MXF解析情報」にはOperational Pattern、Essence Container、解像度、Edit Rate、Aspect Ratio、音声Sample Rate、チャンネル数、Quantization Bits、Timecode Track数、選択された開始タイムコード、Drop Frame、Index Table数とEntry総数を表示します。メタデータから取得できなかった項目を再生用固定値で補完せず、「未取得」と表示します。
 
 ## Indexとシーク
 
-`findSeekPoint()` は目的Edit Unit以前のRandom Access Pointを選択します。Index Entryがなく固定Edit Unit Byte Countがある場合はオフセットを算出し、Index Tableがない・壊れている場合は `source: "sequential-fallback"` として先頭からの順次走査を明示します。streamingシークはIndex EntryのKeyFrameOffset/RAPからprerollを選び、対象区間だけを読み直します。絶対位置が検証できないStreamOffsetは利用せず、KLV索引のvalue offsetを使用します。
+`findSeekPoint()` は目的Edit Unit以前のRandom Access Pointを選択します。Index Entryがない場合は、固定Edit Unit Byte Countだけでは独立デコード可能と判断せず、`source: "sequential-fallback"`として先頭からの順次走査を明示します。streamingシークはIndex EntryのKeyFrameOffset/RAPからprerollを選び、対象区間だけを読み直します。絶対位置が検証できないStreamOffsetは利用せず、KLV索引のvalue offsetを使用します。
 
 ## 読み込み・メモリ設計と段階的移行
 
@@ -138,6 +138,6 @@ libav.jsおよび組み込まれるFFmpeg部分は **GNU LGPL 2.1** です。生
 
 Timecode ComponentからStart Timecode、Rounded Timecode Base、Drop Frame、Duration、Edit Rateを取得し、取得値には`source: "mxf"`を付けます。`mediaFrameToTimecode` / `mediaSecondsToTimecode`と`timecodeToMediaFrame` / `timecodeToMediaSeconds`は整数フレームを基準に、24時間ラップ、29.97/59.94 Drop Frame、素材範囲を検証します。`ref.seekTimecode("10:01:00;02")`は正確なmedia frameへ変換して既存の世代管理付きseekを利用し、`seek(seconds)`との互換性を維持します。Timecode Trackがない場合も再生と秒指定seekは継続します。
 
-複数Trackは、Package参照を解決できた場合にMaterial Package、次にSource Packageを優先します。現在のLocal Set走査でPackage所有関係を一意に解決できないMXF（Primer Packによる動的タグ、複雑なSequence/SourceClip参照を含むもの）では推測せずKLV検出順へフォールバックし、その理由を`timecodeSelectionReason`へ表示します。
+Package参照解析は未対応であり、複数Trackでは常にKLV検出順フォールバックを使用して、その理由を`timecodeSelectionReason`へ表示します。Material Package優先は実装していません。
 
 streaming seekの診断には要求/表示frame、RAP開始frame、preroll、Indexまたはsequential fallback、読み込みbytes、経過時間を含めます。Index EntryのRAP/KeyFrameOffset/Flagsはessence range選択に使用します。TemporalOffsetが示す複雑な表示順の完全な追跡、および絶対StreamOffsetをPartitionへ関連付けられないファイルでは、安全なKLV索引位置を利用する制限があります。

@@ -12,7 +12,7 @@ export interface PlayerDiagnostics {
   audioFormatBasis: "metadata-plus-xdcam-inference" | "xdcam-profile-inference" | null;
   requestedTimecode?: string | null; requestedFrame?: number | null; actualDisplayedFrame?: number | null;
   seekStartFrame?: number | null; prerollFrames?: number; seekSource?: "index" | "sequential-fallback" | null;
-  seekReadBytes?: number; seekElapsedMs?: number | null; selectedTimecodeTrack?: "material" | "source" | "unresolved" | null;
+  seekReadBytes?: number; seekElapsedMs?: number | null; selectedTimecodeTrack?: "unresolved" | null;
   timecodeSelectionReason?: string;
 }
 

@@ -5,9 +5,6 @@ export interface MxfTimecodeInfo {
   editRateNumerator: number;
   editRateDenominator: number;
   durationFrames?: number;
-  packageKind?: "material" | "source";
-  /** True only when package ownership was resolved from structural metadata. */
-  packageReferenceResolved?: boolean;
   source?: "mxf" | "inferred";
 }
 
