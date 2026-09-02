@@ -5,6 +5,7 @@ import { pcmS24beToFloat32, XDCAM_FRAME_RATE, yuv422pToRgba } from "./media";
 import { timecodeAtSeconds, type MxfTimecodeInfo } from "./timecode";
 import type { PlayerInfo, PlayerStatus } from "./types";
 import { WebGlRenderer } from "./webgl";
+import { indexMxfEssence, type EssenceIndex } from "./essence-reader";
 
 interface Callbacks { status(s: PlayerStatus): void; ready(i: PlayerInfo): void; time(t: number): void; error(e: Error): void; mediaInfo?(i: import("./mxf-metadata").MxfMediaInfo): void; timecode?(value: string | null): void; seeking?(value: boolean): void }
 type LibAV = Record<string, any>;
@@ -13,12 +14,14 @@ type RenderFrame = {frame: ImageData; time: number};
 export interface PlayerEngineDependencies {
   createReader(blob: Blob): RandomAccessReader & {destroy():void};
   parseMetadata(reader: RandomAccessReader, signal: AbortSignal): ReturnType<typeof parseMxfMetadataFromReader>;
+  indexEssence?(reader: RandomAccessReader, metadata: Awaited<ReturnType<typeof parseMxfMetadataFromReader>>, signal: AbortSignal): Promise<EssenceIndex>;
   readWhole(blob: Blob): Promise<Uint8Array>;
   parse(bytes: Uint8Array): ParsedMxf;
   loadLibav(base: string): Promise<LibAV>;
 }
 const defaultDependencies: PlayerEngineDependencies = {
   createReader: blob=>new FileRandomAccessReader(blob), parseMetadata:(reader,signal)=>parseMxfMetadataFromReader(reader,{signal}),
+  indexEssence:(reader,metadata,signal)=>indexMxfEssence(reader,{partitions:metadata.partitions,indexTables:metadata.indexTables,frameRate:metadata.mediaInfo.editRateNumerator&&metadata.mediaInfo.editRateDenominator?metadata.mediaInfo.editRateNumerator/metadata.mediaInfo.editRateDenominator:undefined,signal}),
   readWhole:async blob=>new Uint8Array(await blob.slice(0,blob.size).arrayBuffer()), parse:parseMxf, loadLibav:loadCustomLibAV,
 };
 
@@ -72,12 +75,14 @@ export class PlayerEngine {
   private frames: Array<{frame: ImageData; time: number}>=[]; private raf=0;
   private timecodeInfo?: MxfTimecodeInfo;
   private loadController?: AbortController; private destroyed=false; private loadGeneration=0;
+  private seekController?: AbortController; private seekGeneration=0;
   private readonly dependencies: PlayerEngineDependencies;
   constructor(canvas: HTMLCanvasElement, private callbacks: Callbacks, private muted=false, private libavBase="/libav", dependencies: Partial<PlayerEngineDependencies>={}) { this.renderer=new WebGlRenderer(canvas);this.dependencies={...defaultDependencies,...dependencies}; }
   get currentTime(): number { return this.status === "playing" ? Math.min(this.durationValue,(performance.now()-this.startedAt)/1000) : this.pausedAt; }
   get duration(): number { return this.durationValue; }
   private setStatus(s: PlayerStatus) { this.status=s; this.callbacks.status(s); }
   async load(source: File|Blob|string): Promise<void> {
+    this.stopAudioSource(); this.seekController?.abort(); this.seekGeneration++;
     this.loadController?.abort(); const controller=new AbortController(); this.loadController=controller; const {signal}=controller, generation=++this.loadGeneration;
     const current=()=>!signal.aborted&&!this.destroyed&&this.loadGeneration===generation;
     this.setStatus("loading");
@@ -86,7 +91,7 @@ export class PlayerEngine {
       if(!current())return;
       const reader=this.dependencies.createReader(blob);
       let metadata;
-      try { metadata=await this.dependencies.parseMetadata(reader,signal); }
+      try { metadata=await this.dependencies.parseMetadata(reader,signal);if(current()&&this.dependencies.indexEssence)await this.dependencies.indexEssence(reader,metadata,signal); }
       finally { reader.destroy(); }
       if(!current())return;
       const timecodeInfo=selectTimecodeTrack(metadata.timecodes);
@@ -147,12 +152,13 @@ export class PlayerEngine {
     const channels=pcmS24beToFloat32(joined,2), audioBuffer=audio.createBuffer(2,channels[0].length,48000);
     channels.forEach((samples,index)=>audioBuffer.copyToChannel(new Float32Array(samples),index)); await audio.suspend(); return {audio,audioBuffer};
   }
-  private startAudio(offset:number):void { if(!this.audio||!this.audioBuffer)return; this.audioSource?.stop(); const node=this.audio.createBufferSource(); node.buffer=this.audioBuffer; node.connect(this.audio.destination); node.start(0,Math.min(offset,this.audioBuffer.duration)); this.audioSource=node; }
+  private stopAudioSource():void { const source=this.audioSource;this.audioSource=undefined;if(!source)return;try{source.stop();}catch{/* An AudioBufferSourceNode can only be stopped once on some implementations. */}try{source.disconnect();}catch{/* A disconnected node is already harmless. */} }
+  private startAudio(offset:number):void { if(!this.audio||!this.audioBuffer)return; this.stopAudioSource(); const node=this.audio.createBufferSource(); node.buffer=this.audioBuffer; node.connect(this.audio.destination); node.start(0,Math.min(offset,this.audioBuffer.duration)); this.audioSource=node; }
   async play(): Promise<void> { if(this.status==="playing")return; this.startAudio(this.pausedAt); await this.audio?.resume(); this.startedAt=performance.now()-this.pausedAt*1000; this.setStatus("playing"); this.tick(); }
-  pause(): void { if(this.status!=="playing")return; this.pausedAt=this.currentTime; this.audioSource?.stop(); this.audioSource=undefined; void this.audio?.suspend(); cancelAnimationFrame(this.raf); this.setStatus("paused"); }
-  async seek(seconds:number): Promise<void> { this.callbacks.seeking?.(true); try { this.pausedAt=Math.max(0,Math.min(this.durationValue,seconds)); if(this.status==="playing"){this.startedAt=performance.now()-this.pausedAt*1000;this.startAudio(this.pausedAt);} this.drawAt(this.pausedAt); this.emitTime(this.pausedAt); } finally { this.callbacks.seeking?.(false); } }
+  pause(): void { if(this.status!=="playing")return; this.pausedAt=this.currentTime; this.stopAudioSource(); void this.audio?.suspend(); cancelAnimationFrame(this.raf);this.raf=0; this.setStatus("paused"); }
+  async seek(seconds:number): Promise<void> { this.seekController?.abort();const controller=new AbortController();this.seekController=controller;const generation=++this.seekGeneration,isCurrent=()=>!controller.signal.aborted&&!this.destroyed&&generation===this.seekGeneration;this.callbacks.seeking?.(true); try { if(!isCurrent())return;this.pausedAt=Math.max(0,Math.min(this.durationValue,seconds)); if(this.status==="playing"){this.startedAt=performance.now()-this.pausedAt*1000;this.startAudio(this.pausedAt);} this.drawAt(this.pausedAt); this.emitTime(this.pausedAt); } finally { if(isCurrent())this.callbacks.seeking?.(false); } }
   private emitTime(t:number){this.callbacks.time(t);this.callbacks.timecode?.(this.timecodeInfo ? timecodeAtSeconds(this.timecodeInfo,t) : null);}
   private drawAt(t:number){const f=this.frames[Math.min(this.frames.length-1,Math.floor(t*XDCAM_FRAME_RATE))];if(f)this.renderer.draw(f.frame,f.frame.width,f.frame.height);}
-  private tick=()=>{const t=this.currentTime;this.drawAt(t);this.emitTime(t);if(t>=this.durationValue){this.pausedAt=t;this.setStatus("ended");return;}this.raf=requestAnimationFrame(this.tick);};
-  destroy():void{this.destroyed=true;this.loadGeneration++;this.loadController?.abort();cancelAnimationFrame(this.raf);this.audioSource?.stop();void this.audio?.close();this.frames=[];}
+  private tick():void{if(this.destroyed||this.status!=="playing")return;const t=this.currentTime;this.drawAt(t);this.emitTime(t);if(t>=this.durationValue){this.pausedAt=this.durationValue;this.stopAudioSource();void this.audio?.suspend();cancelAnimationFrame(this.raf);this.raf=0;this.setStatus("ended");return;}this.raf=requestAnimationFrame(()=>this.tick());}
+  destroy():void{this.destroyed=true;this.loadGeneration++;this.seekGeneration++;this.loadController?.abort();this.seekController?.abort();cancelAnimationFrame(this.raf);this.raf=0;this.stopAudioSource();void this.audio?.close();this.frames=[];}
 }
