@@ -221,8 +221,8 @@ describe("PlayerEngine streaming mode",()=>{
   });
 
   it("moves the current generation to error when a background fill fails",async()=>{
-    vi.stubGlobal("cancelAnimationFrame",vi.fn());const h=streamingPlaybackHarness();h.engine.buffering=true;h.engine.fillStreaming=vi.fn().mockRejectedValue(new Error("read failed"));h.engine.requestFill(0);await Promise.resolve();await Promise.resolve();
-    expect(h.engine.status).toBe("error");expect(h.callbacks.error).toHaveBeenCalledWith(expect.objectContaining({message:"read failed"}));expect(h.callbacks.buffering).toHaveBeenCalledWith(false);expect(h.engine.resumeAfterBuffer).toBe(false);
+    vi.stubGlobal("cancelAnimationFrame",vi.fn());const h=streamingPlaybackHarness(),destroy=vi.fn();h.engine.reader={destroy};h.engine.frames=[{frame:{width:2,height:2},time:0}];h.engine.buffering=true;h.engine.fillStreaming=vi.fn().mockRejectedValue(new Error("read failed"));h.engine.requestFill(0);await Promise.resolve();await Promise.resolve();
+    expect(h.engine.status).toBe("error");expect(h.callbacks.error).toHaveBeenCalledWith(expect.objectContaining({message:"read failed"}));expect(h.callbacks.buffering).toHaveBeenCalledWith(false);expect(h.engine.resumeAfterBuffer).toBe(false);expect(destroy).toHaveBeenCalledOnce();expect(h.engine.reader).toBeUndefined();expect(h.engine.frames).toEqual([]);
   });
 
   it("ignores stale and post-destroy fill failures",async()=>{
@@ -233,6 +233,18 @@ describe("PlayerEngine streaming mode",()=>{
   it("an old load cleanup cannot destroy the replacement reader",()=>{
     const h=streamingPlaybackHarness(),a={destroy:vi.fn()},b={destroy:vi.fn()};h.engine.reader=a;h.engine.releaseReader(a);h.engine.reader=b;h.engine.releaseReader(a);
     expect(a.destroy).toHaveBeenCalledOnce();expect(b.destroy).not.toHaveBeenCalled();expect(h.engine.reader).toBe(b);
+  });
+
+  it("treats an aborted stale seek as a successful cancellation",async()=>{
+    vi.stubGlobal("requestAnimationFrame",vi.fn(()=>1));vi.stubGlobal("cancelAnimationFrame",vi.fn());const h=streamingPlaybackHarness(),firstEntered=gate();h.engine.status="paused";
+    h.engine.fillStreaming=vi.fn(async(start:number,signal:AbortSignal)=>{if(start===100){firstEntered.open();await firstEntered.wait;if(signal.aborted)throw new DOMException("aborted","AbortError");}h.engine.frames=[{frame:{width:2,height:2},time:start/10}];return true;});
+    const first=h.engine.seek(10);await firstEntered.entered;const second=h.engine.seek(100);firstEntered.release();await expect(first).resolves.toBeUndefined();await expect(second).resolves.toBeUndefined();
+    expect(h.callbacks.error).not.toHaveBeenCalled();expect(h.callbacks.status).not.toHaveBeenCalledWith("error");expect(h.engine.renderer.draw).toHaveBeenLastCalledWith(expect.objectContaining({width:2}),2,2);expect(h.engine.frames[0].time).toBe(100);
+  });
+
+  it("treats destroy during seek as a successful cancellation",async()=>{
+    vi.stubGlobal("cancelAnimationFrame",vi.fn());const h=streamingPlaybackHarness(),entered=gate();h.engine.releaseReader=vi.fn();h.engine.fillStreaming=vi.fn(async(_start:number,signal:AbortSignal)=>{entered.open();await entered.wait;if(signal.aborted)throw new DOMException("aborted","AbortError");return false;});
+    const seeking=h.engine.seek(10);await entered.entered;h.engine.destroy();entered.release();await expect(seeking).resolves.toBeUndefined();expect(h.callbacks.error).not.toHaveBeenCalled();expect(h.callbacks.status).not.toHaveBeenCalledWith("error");
   });
 });
 
