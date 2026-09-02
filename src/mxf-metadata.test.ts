@@ -21,6 +21,7 @@ describe("parseMxfMetadata", () => {
     ));
     const parsed = parseMxfMetadata(descriptor);
     expect(parsed.mediaInfo).toMatchObject({ editRateNumerator: 30000, editRateDenominator: 1001, video: { width: 1920, height: 1080, aspectRatio: "16:9" }, audio: { sampleRate: 48000, channels: 2, bitsPerSample: 24 } });
+    expect(parsed.mediaInfo.timecodeTrackCount).toBe(1);
     expect(parsed.timecodes[0]).toEqual({ startFrame: 1_080_000, roundedTimecodeBase: 30, dropFrame: true, editRateNumerator: 30000, editRateDenominator: 1001, durationFrames: 900 });
   });
 
@@ -39,6 +40,7 @@ describe("parseMxfMetadata", () => {
       field(0x3f0a, concat(be32(1), be32(11), entry)),
     ));
     const table = parseMxfMetadata(index).indexTables[0];
+    expect(parseMxfMetadata(index).mediaInfo).toMatchObject({ indexTableCount: 1, indexEntryCount: 1 });
     expect(table.editRateNumerator).toBe(30000);
     expect(table.entries[0]).toMatchObject({ editUnit: 0, streamOffset, keyFrameOffset: 0, temporalOffset: 0, isRandomAccessPoint: true, flags: 0x80 });
   });

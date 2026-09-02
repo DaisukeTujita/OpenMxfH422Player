@@ -55,6 +55,12 @@ Stream OffsetはJavaScriptの安全な整数範囲に丸めず `bigint` で保�
 
 サンプル画面はミリ秒単位の再生位置とMXFタイムコードを併記します。Non-Drop Frameに加え、29.97 fps（base 30）と59.94 fps（base 60）のDrop Frame番号を扱い、区切りはDrop Frameでは `;`、Non-Dropでは `:` です。開始タイムコードへ現在の再生フレームを加算し、24時間でラップします。利用可能なTimecode Trackがない場合は「タイムコードなし」と表示し、再生自体は継続します。
 
+### 複数Timecode Trackの選択規則
+
+現段階ではMaterial PackageとSource Packageの参照関係を完全には解決していません。複数のTimecode Trackが見つかった場合は、**MXF内のKLV検出順で最初に現れ、Edit Rateの分子・分母がともに正数であるTrack**を表示に使用します。検出数を`console.debug`へ、複数検出の警告を`console.warn`へ、選択したTrackのStart Timecode（frame値）・Edit Rate・Drop Frameを`console.info`へ出力します。この規則は暫定的なもので、Package参照を解決できるようになった段階でMaterial Package優先へ置き換える予定です。
+
+サンプルの「MXF解析情報」にはOperational Pattern、Essence Container、解像度、Edit Rate、Aspect Ratio、音声Sample Rate、チャンネル数、Quantization Bits、Timecode Track数、選択された開始タイムコード、Drop Frame、Index Table数とEntry総数を表示します。メタデータから取得できなかった項目を再生用固定値で補完せず、「未取得」と表示します。
+
 ## Indexとシーク
 
 `findSeekPoint()` は目的Edit Unit以前のRandom Access Pointを選択します。Index Entryがなく固定Edit Unit Byte Countがある場合はオフセットを算出し、Index Tableがない・壊れている場合は `source: "sequential-fallback"` として先頭からの順次走査を明示します。現在のプレイヤー本体は全フレームが既にデコード済みの従来シークを使用しており、Index位置からの部分読み込みとデコーダ再開は後続段階で統合します。

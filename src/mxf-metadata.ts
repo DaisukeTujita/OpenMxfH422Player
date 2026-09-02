@@ -14,6 +14,11 @@ export interface MxfMediaInfo {
     aspectRatio?: string; pixelFormat?: string; durationFrames?: number;
   };
   audio?: { codec?: string; sampleRate?: number; channels?: number; bitsPerSample?: number };
+  /** Inspection summaries; these are derived from parsed structures, never playback fallbacks. */
+  timecodeTrackCount: number;
+  selectedTimecode?: MxfTimecodeInfo;
+  indexTableCount: number;
+  indexEntryCount: number;
 }
 
 export interface MxfMetadataResult { mediaInfo: MxfMediaInfo; timecodes: MxfTimecodeInfo[]; indexTables: MxfIndexTable[] }
@@ -60,7 +65,7 @@ function parseIndex(fields: Fields): MxfIndexTable | undefined {
 
 /** Parse structural metadata local sets and index segments without assuming an essence format. */
 export function parseMxfMetadata(data: Uint8Array): MxfMetadataResult {
-  const result: MxfMetadataResult = { mediaInfo: {}, timecodes: [], indexTables: [] };
+  const result: MxfMetadataResult = { mediaInfo: { timecodeTrackCount: 0, indexTableCount: 0, indexEntryCount: 0 }, timecodes: [], indexTables: [] };
   const editRates: Array<readonly [number, number]> = [];
   let at = 0;
   while (at + 17 <= data.length) {
@@ -97,5 +102,8 @@ export function parseMxfMetadata(data: Uint8Array): MxfMetadataResult {
     if (result.mediaInfo.video) { result.mediaInfo.video.frameRateNumerator = rate[0]; result.mediaInfo.video.frameRateDenominator = rate[1]; }
     for (const tc of result.timecodes) if (!tc.editRateNumerator) { tc.editRateNumerator = rate[0]; tc.editRateDenominator = rate[1]; }
   }
+  result.mediaInfo.timecodeTrackCount = result.timecodes.length;
+  result.mediaInfo.indexTableCount = result.indexTables.length;
+  result.mediaInfo.indexEntryCount = result.indexTables.reduce((total, table) => total + table.entries.length, 0);
   return result;
 }

@@ -1,6 +1,7 @@
 import { useRef, useState } from "react";
 import {
   H422Player,
+  formatTimecodeFrame,
   type H422PlayerHandle,
   type MxfMediaInfo,
   type PlayerInfo,
@@ -16,6 +17,8 @@ const statusLabels: Record<PlayerStatus, string> = {
   ended: "再生終了",
   error: "エラー",
 };
+
+const obtained = (value: string | number | undefined) => value ?? "未取得";
 
 const formatTime = (seconds: number) => {
   const safeSeconds = Number.isFinite(seconds) ? Math.max(0, seconds) : 0;
@@ -36,6 +39,9 @@ export function App() {
   const [mediaInfo, setMediaInfo] = useState<MxfMediaInfo>();
   const [timecode, setTimecode] = useState<string | null>(null);
   const [seeking, setSeeking] = useState(false);
+  const selectedStartTimecode = mediaInfo?.selectedTimecode
+    ? formatTimecodeFrame(mediaInfo.selectedTimecode.startFrame, mediaInfo.selectedTimecode.roundedTimecodeBase, mediaInfo.selectedTimecode.dropFrame)
+    : undefined;
 
   const selectFile = (nextFile?: File) => {
     setFile(nextFile);
@@ -128,7 +134,23 @@ export function App() {
 
       <section className="status-grid" aria-live="polite">
         <div className="panel"><h2>再生状態</h2><strong className={`status status-${status}`}>{seeking ? "シーク中" : statusLabels[status]}</strong><p>再生位置: {formatTime(currentTime)}</p><p>タイムコード: {timecode ?? "タイムコードなし"}</p></div>
-        <div className="panel"><h2>メディア情報</h2><p>{info ? `${mediaInfo?.video?.width ?? info.width} × ${mediaInfo?.video?.height ?? info.height} / ${mediaInfo?.editRateNumerator && mediaInfo.editRateDenominator ? `${mediaInfo.editRateNumerator}/${mediaInfo.editRateDenominator}` : info.frameRate} fps / ${mediaInfo?.audio?.channels ?? info.audioChannels} ch` : "—"}</p></div>
+        <div className="panel media-inspection">
+          <h2>MXF解析情報</h2>
+          <dl>
+            <dt>Operational Pattern</dt><dd>{obtained(mediaInfo?.operationalPattern)}</dd>
+            <dt>Essence Container</dt><dd>{obtained(mediaInfo?.essenceContainer)}</dd>
+            <dt>解像度</dt><dd>{mediaInfo?.video?.width !== undefined && mediaInfo.video.height !== undefined ? `${mediaInfo.video.width} × ${mediaInfo.video.height}` : "未取得"}</dd>
+            <dt>Edit Rate</dt><dd>{mediaInfo?.editRateNumerator !== undefined && mediaInfo.editRateDenominator !== undefined ? `${mediaInfo.editRateNumerator}/${mediaInfo.editRateDenominator}` : "未取得"}</dd>
+            <dt>Aspect Ratio</dt><dd>{obtained(mediaInfo?.video?.aspectRatio)}</dd>
+            <dt>音声Sample Rate</dt><dd>{mediaInfo?.audio?.sampleRate !== undefined ? `${mediaInfo.audio.sampleRate} Hz` : "未取得"}</dd>
+            <dt>チャンネル数</dt><dd>{obtained(mediaInfo?.audio?.channels)}</dd>
+            <dt>Quantization Bits</dt><dd>{mediaInfo?.audio?.bitsPerSample !== undefined ? `${mediaInfo.audio.bitsPerSample} bit` : "未取得"}</dd>
+            <dt>Timecode Track数</dt><dd>{mediaInfo ? mediaInfo.timecodeTrackCount : "未取得"}</dd>
+            <dt>選択された開始TC</dt><dd>{obtained(selectedStartTimecode)}</dd>
+            <dt>Drop Frame</dt><dd>{mediaInfo?.selectedTimecode ? (mediaInfo.selectedTimecode.dropFrame ? "あり" : "なし") : "未取得"}</dd>
+            <dt>Index Table</dt><dd>{mediaInfo ? `${mediaInfo.indexTableCount > 0 ? "あり" : "なし"}（${mediaInfo.indexTableCount} table / ${mediaInfo.indexEntryCount} entries）` : "未取得"}</dd>
+          </dl>
+        </div>
         <div className="panel error-panel"><h2>エラー</h2><p>{error || "エラーはありません"}</p></div>
       </section>
     </main>

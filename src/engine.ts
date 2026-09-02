@@ -9,6 +9,21 @@ interface Callbacks { status(s: PlayerStatus): void; ready(i: PlayerInfo): void;
 type LibAV = Record<string, any>;
 type DecodedFrame = { data?: Uint8Array; layout?: Array<{offset:number; stride:number}>; width: number; height: number; format?: number; pts?: number };
 
+type TimecodeLogger = Pick<Console, "debug" | "info" | "warn">;
+
+/**
+ * Until package references are resolved, preserve KLV discovery order and select
+ * the first track that has a usable Edit Rate. The diagnostics make ambiguity visible.
+ */
+export function selectTimecodeTrack(timecodes: MxfTimecodeInfo[], logger: TimecodeLogger = console): MxfTimecodeInfo | undefined {
+  logger.debug(`[H422Player] detected Timecode Tracks: ${timecodes.length}`);
+  if (timecodes.length > 1) logger.warn(`[H422Player] multiple Timecode Tracks detected (${timecodes.length}); selecting the first usable track in KLV discovery order`);
+  const selected = timecodes.find(value => value.editRateNumerator > 0 && value.editRateDenominator > 0);
+  if (selected) logger.info(`[H422Player] selected Timecode Track: start=${selected.startFrame} edit_rate=${selected.editRateNumerator}/${selected.editRateDenominator} drop_frame=${selected.dropFrame}`);
+  else logger.debug("[H422Player] no Timecode Track with a usable Edit Rate was found");
+  return selected;
+}
+
 export async function loadCustomLibAV(base: string): Promise<LibAV> {
   const normalizedBase = base.replace(/\/$/, "");
   const url = `${normalizedBase}/libav-h422.mjs`;
@@ -52,8 +67,10 @@ export class PlayerEngine {
     try {
       const blob=typeof source === "string" ? await fetch(source).then(r=>{if(!r.ok)throw new Error(`MXF request failed (${r.status})`);return r.blob();}) : source;
       const bytes=new Uint8Array(await blob.arrayBuffer());
-      const metadata=parseMxfMetadata(bytes); this.callbacks.mediaInfo?.(metadata.mediaInfo);
-      this.timecodeInfo=metadata.timecodes.find(value=>value.editRateNumerator>0&&value.editRateDenominator>0);
+      const metadata=parseMxfMetadata(bytes);
+      this.timecodeInfo=selectTimecodeTrack(metadata.timecodes);
+      metadata.mediaInfo.selectedTimecode=this.timecodeInfo;
+      this.callbacks.mediaInfo?.(metadata.mediaInfo);
       this.callbacks.timecode?.(this.timecodeInfo ? timecodeAtSeconds(this.timecodeInfo,0) : null);
       const parsed=parseMxf(bytes);
       console.info(`[H422Player] video codec_id=${parsed.videoCodec.codecId} codec_name=${parsed.videoCodec.codecName}`);
