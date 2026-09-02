@@ -63,9 +63,47 @@ function parseIndex(fields: Fields): MxfIndexTable | undefined {
   return table;
 }
 
+export function createMxfMetadataResult(): MxfMetadataResult {
+  return { mediaInfo: { timecodeTrackCount: 0, indexTableCount: 0, indexEntryCount: 0 }, timecodes: [], indexTables: [] };
+}
+
+/** Shared KLV value parser used by both contiguous and random-access traversal. */
+export function parseMxfMetadataKlv(result: MxfMetadataResult, key: Uint8Array, value: Uint8Array, editRates: Array<readonly [number, number]>): void {
+  const keyHex = text(key);
+  if (keyHex.startsWith("060e2b34020501010d01020101") && value.length >= 80) {
+    const op = text(value.subarray(64, 80));
+    if (op.startsWith("060e2b34040101010d01020101")) result.mediaInfo.operationalPattern = "OP1a";
+  } else if (keyHex.startsWith("060e2b34025301010d0102010110")) {
+    try { const index = parseIndex(localSet(value)); if (index) result.indexTables.push(index); } catch { /* A corrupt index is non-fatal. */ }
+  } else if (keyHex.startsWith("060e2b3402530101")) {
+    let fields: Fields; try { fields = localSet(value); } catch { return; }
+    const rate = rational(fields.get(0x4b01)); if (rate) editRates.push(rate);
+    const startTc = fields.get(0x1501), base = fields.get(0x1502), drop = fields.get(0x1503);
+    if (startTc && base && drop) result.timecodes.push({ startFrame: i64(startTc), roundedTimecodeBase: u16(base), dropFrame: drop[0] !== 0, editRateNumerator: rate?.[0] ?? 0, editRateDenominator: rate?.[1] ?? 0, durationFrames: fields.get(0x0202) ? i64(fields.get(0x0202)!) : undefined });
+    const width = fields.get(0x3203), height = fields.get(0x3202), aspect = rational(fields.get(0x320e));
+    if (width || height || aspect) result.mediaInfo.video = { ...result.mediaInfo.video, width: width ? u32(width) : undefined, height: height ? u32(height) : undefined, aspectRatio: aspect ? `${aspect[0]}:${aspect[1]}` : undefined };
+    const sampleRate = rational(fields.get(0x3d03)), channels = fields.get(0x3d07), bits = fields.get(0x3d01);
+    if (sampleRate || channels || bits) result.mediaInfo.audio = { ...result.mediaInfo.audio, sampleRate: sampleRate ? sampleRate[0] / sampleRate[1] : undefined, channels: channels ? u32(channels) : undefined, bitsPerSample: bits ? u32(bits) : undefined };
+    const essence = fields.get(0x3004); if (essence) result.mediaInfo.essenceContainer = text(essence);
+    const duration = fields.get(0x3002); if (duration) result.mediaInfo.durationFrames = i64(duration);
+  }
+}
+
+export function finalizeMxfMetadata(result: MxfMetadataResult, editRates: Array<readonly [number, number]>): MxfMetadataResult {
+  const rate = editRates[0] ?? (result.indexTables[0] ? [result.indexTables[0].editRateNumerator, result.indexTables[0].editRateDenominator] as const : undefined);
+  if (rate) {
+    result.mediaInfo.editRateNumerator = rate[0]; result.mediaInfo.editRateDenominator = rate[1];
+    if (result.mediaInfo.video) { result.mediaInfo.video.frameRateNumerator = rate[0]; result.mediaInfo.video.frameRateDenominator = rate[1]; }
+    for (const tc of result.timecodes) if (!tc.editRateNumerator) { tc.editRateNumerator = rate[0]; tc.editRateDenominator = rate[1]; }
+  }
+  result.mediaInfo.timecodeTrackCount = result.timecodes.length; result.mediaInfo.indexTableCount = result.indexTables.length;
+  result.mediaInfo.indexEntryCount = result.indexTables.reduce((total, table) => total + table.entries.length, 0);
+  return result;
+}
+
 /** Parse structural metadata local sets and index segments without assuming an essence format. */
 export function parseMxfMetadata(data: Uint8Array): MxfMetadataResult {
-  const result: MxfMetadataResult = { mediaInfo: { timecodeTrackCount: 0, indexTableCount: 0, indexEntryCount: 0 }, timecodes: [], indexTables: [] };
+  const result = createMxfMetadataResult();
   const editRates: Array<readonly [number, number]> = [];
   let at = 0;
   while (at + 17 <= data.length) {
@@ -74,36 +112,8 @@ export function parseMxfMetadata(data: Uint8Array): MxfMetadataResult {
     const key = data.subarray(at, at + 16);
     const start = at + 16 + length.bytes, end = start + length.value;
     if (end > data.length) break;
-    const keyHex = text(key), value = data.subarray(start, end);
-    if (keyHex.startsWith("060e2b34020501010d01020101") && value.length >= 80) {
-      const op = text(value.subarray(64, 80));
-      if (op.startsWith("060e2b34040101010d01020101")) result.mediaInfo.operationalPattern = "OP1a";
-    } else if (keyHex.startsWith("060e2b34025301010d0102010110")) {
-      // A corrupt index is non-fatal: callers can use sequential-fallback.
-      try { const index = parseIndex(localSet(value)); if (index) result.indexTables.push(index); } catch { /* Ignore only this segment. */ }
-    } else if (keyHex.startsWith("060e2b3402530101")) {
-      let fields: Fields;
-      try { fields = localSet(value); } catch { at = end; continue; }
-      const rate = rational(fields.get(0x4b01)); if (rate) editRates.push(rate);
-      const startTc = fields.get(0x1501), base = fields.get(0x1502), drop = fields.get(0x1503);
-      if (startTc && base && drop) result.timecodes.push({ startFrame: i64(startTc), roundedTimecodeBase: u16(base), dropFrame: drop[0] !== 0, editRateNumerator: rate?.[0] ?? 0, editRateDenominator: rate?.[1] ?? 0, durationFrames: fields.get(0x0202) ? i64(fields.get(0x0202)!) : undefined });
-      const width = fields.get(0x3203), height = fields.get(0x3202), aspect = rational(fields.get(0x320e));
-      if (width || height || aspect) result.mediaInfo.video = { ...result.mediaInfo.video, width: width ? u32(width) : undefined, height: height ? u32(height) : undefined, aspectRatio: aspect ? `${aspect[0]}:${aspect[1]}` : undefined };
-      const sampleRate = rational(fields.get(0x3d03)), channels = fields.get(0x3d07), bits = fields.get(0x3d01);
-      if (sampleRate || channels || bits) result.mediaInfo.audio = { ...result.mediaInfo.audio, sampleRate: sampleRate ? sampleRate[0] / sampleRate[1] : undefined, channels: channels ? u32(channels) : undefined, bitsPerSample: bits ? u32(bits) : undefined };
-      const essence = fields.get(0x3004); if (essence) result.mediaInfo.essenceContainer = text(essence);
-      const duration = fields.get(0x3002); if (duration) result.mediaInfo.durationFrames = i64(duration);
-    }
+    parseMxfMetadataKlv(result, key, data.subarray(start, end), editRates);
     at = end;
   }
-  const rate = editRates[0] ?? (result.indexTables[0] ? [result.indexTables[0].editRateNumerator, result.indexTables[0].editRateDenominator] as const : undefined);
-  if (rate) {
-    result.mediaInfo.editRateNumerator = rate[0]; result.mediaInfo.editRateDenominator = rate[1];
-    if (result.mediaInfo.video) { result.mediaInfo.video.frameRateNumerator = rate[0]; result.mediaInfo.video.frameRateDenominator = rate[1]; }
-    for (const tc of result.timecodes) if (!tc.editRateNumerator) { tc.editRateNumerator = rate[0]; tc.editRateDenominator = rate[1]; }
-  }
-  result.mediaInfo.timecodeTrackCount = result.timecodes.length;
-  result.mediaInfo.indexTableCount = result.indexTables.length;
-  result.mediaInfo.indexEntryCount = result.indexTables.reduce((total, table) => total + table.entries.length, 0);
-  return result;
+  return finalizeMxfMetadata(result, editRates);
 }

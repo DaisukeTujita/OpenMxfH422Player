@@ -134,3 +134,25 @@ describe("selectTimecodeTrack", () => {
     expect(selectTimecodeTrack([{ ...first, editRateNumerator: 0 }, second], logger)).toBe(second);
   });
 });
+
+type Gate = { entered: Promise<void>; wait: Promise<void>; open():void; release(): void };
+function gate(): Gate { let open!:()=>void,release!:()=>void;const entered=new Promise<void>(resolve=>{open=resolve;}),wait=new Promise<void>(resolve=>{release=resolve;});return {entered,wait,open,release}; }
+
+function lifecycleHarness(block:"metadata"|"video"|"audio") {
+  const pause=gate(),events:string[]=[],destroyedReaders:number[]=[];
+  const callbacks={status:vi.fn((value:string)=>events.push(`status:${value}`)),ready:vi.fn(()=>events.push("ready")),time:vi.fn(),error:vi.fn(()=>events.push("error")),mediaInfo:vi.fn(()=>events.push("mediaInfo")),timecode:vi.fn(()=>events.push("timecode"))};
+  const engine=Object.create(PlayerEngine.prototype) as any;Object.assign(engine,{callbacks,muted:false,libavBase:"/libav",renderer:{draw:vi.fn()},frames:[],loadGeneration:0,destroyed:false,dependencies:{
+    createReader:(blob:Blob)=>({size:BigInt(blob.size),read:vi.fn(),destroy:()=>destroyedReaders.push(blob.size),id:blob.size}),
+    parseMetadata:async(reader:{id:number})=>{if(reader.id===1&&block==="metadata"){pause.open();await pause.wait;}return {mediaInfo:{timecodeTrackCount:0,indexTableCount:0,indexEntryCount:0,durationFrames:reader.id},timecodes:[],indexTables:[],partitions:[],usedRandomIndexPack:false};},
+    readWhole:async(blob:Blob)=>new Uint8Array([blob.size]),parse:(bytes:Uint8Array)=>({packets:[{kind:"video",trackNumber:1,bodyOffset:0,data:new Uint8Array([bytes[0]])},{kind:"audio",trackNumber:1,bodyOffset:0,data:new Uint8Array([bytes[0],0,0,bytes[0],0,0])}],operationalPattern:"OP1a",isXdcamHd422:true,videoCodec:{codecId:2,codecName:"mpeg2video"},audioCodec:{codecId:65549,codecName:"pcm_s24be"}}),
+    loadLibav:async()=>({libavjs_with_swscale:async()=>1}),
+  }});
+  engine.decodeVideo=async(chunks:Uint8Array[])=>{if(chunks[0][0]===1&&block==="video"){pause.open();await pause.wait;}return [{frame:{width:2,height:2},time:0}];};
+  engine.preparePcm=async(chunks:Uint8Array[])=>{if(chunks[0][0]===1&&block==="audio"){pause.open();await pause.wait;}return {audio:{close:vi.fn()},audioBuffer:{}};};
+  return {engine,callbacks,events,pause,destroyedReaders};
+}
+
+describe("PlayerEngine stale load suppression",()=>{
+  for(const stage of ["metadata","video","audio"] as const) it(`suppresses an old load interrupted during ${stage}`,async()=>{const h=lifecycleHarness(stage),old=h.engine.load(new Blob([new Uint8Array(1)]));await h.pause.entered;const current=h.engine.load(new Blob([new Uint8Array(2)]));await current;h.pause.release();await old;expect(h.callbacks.ready).toHaveBeenCalledOnce();expect(h.callbacks.mediaInfo).toHaveBeenCalledOnce();expect(h.callbacks.mediaInfo.mock.calls[0][0].durationFrames).toBe(2);expect(h.callbacks.timecode).toHaveBeenCalledOnce();expect(h.callbacks.error).not.toHaveBeenCalled();expect(h.events.filter(value=>value==="status:ready")).toHaveLength(1);expect(h.destroyedReaders.sort()).toEqual([1,2]);});
+  it("does not publish decoded output after destroy",async()=>{vi.stubGlobal("cancelAnimationFrame",vi.fn());const h=lifecycleHarness("video"),loading=h.engine.load(new Blob([new Uint8Array(1)]));await h.pause.entered;h.engine.destroy();h.pause.release();await loading;expect(h.callbacks.ready).not.toHaveBeenCalled();expect(h.callbacks.mediaInfo).not.toHaveBeenCalled();expect(h.callbacks.timecode).not.toHaveBeenCalled();expect(h.callbacks.error).not.toHaveBeenCalled();expect(h.engine.renderer.draw).not.toHaveBeenCalled();});
+});

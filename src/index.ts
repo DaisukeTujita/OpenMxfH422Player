@@ -1,9 +1,15 @@
 export { H422Player } from "./H422Player";
 export { parseMxf, readBer } from "./mxf";
 export { parseMxfMetadata } from "./mxf-metadata";
+export { parseMxfMetadataFromReader } from "./mxf-reader";
+export { FileRandomAccessReader, DEFAULT_READER_CACHE_BYTES, DEFAULT_READER_CHUNK_SIZE, DEFAULT_READER_MAX_READ_SIZE } from "./random-access-reader";
+export { readKlvHeader, readKlvValue } from "./klv-reader";
 export { findSeekPoint } from "./mxf-index";
 export { formatTimecodeFrame, timecodeAtFrame, timecodeAtSeconds } from "./timecode";
 export type { MxfMediaInfo, MxfMetadataResult } from "./mxf-metadata";
+export type { MxfPartitionInfo, MxfReaderResult } from "./mxf-reader";
+export type { RandomAccessReader, ReaderStats, FileRandomAccessReaderOptions } from "./random-access-reader";
+export type { KlvHeader } from "./klv-reader";
 export type { MxfIndexEntry, MxfIndexTable, SeekPoint } from "./mxf-index";
 export type { MxfTimecodeInfo } from "./timecode";
 export type { H422PlayerHandle, H422PlayerProps, PlayerInfo, PlayerStatus } from "./types";
