@@ -14,4 +14,4 @@ export type { KlvHeader } from "./klv-reader";
 export type { MxfIndexEntry, MxfIndexTable, SeekPoint } from "./mxf-index";
 export type { EssenceIndex, EssenceIndexEntry, EssenceRangeOptions, ReadEssencePacket } from "./essence-reader";
 export type { MxfTimecodeInfo } from "./timecode";
-export type { H422PlayerHandle, H422PlayerProps, PlayerInfo, PlayerStatus } from "./types";
+export type { H422PlayerHandle, H422PlayerProps, PlaybackMode, PlayerDiagnostics, PlayerInfo, PlayerStatus } from "./types";
