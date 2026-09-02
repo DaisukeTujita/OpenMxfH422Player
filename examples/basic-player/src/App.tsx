@@ -2,6 +2,7 @@ import { useRef, useState } from "react";
 import {
   H422Player,
   type H422PlayerHandle,
+  type MxfMediaInfo,
   type PlayerInfo,
   type PlayerStatus,
 } from "@openmxf/h422-player";
@@ -18,8 +19,11 @@ const statusLabels: Record<PlayerStatus, string> = {
 
 const formatTime = (seconds: number) => {
   const safeSeconds = Number.isFinite(seconds) ? Math.max(0, seconds) : 0;
-  const minutes = Math.floor(safeSeconds / 60);
-  return `${minutes}:${Math.floor(safeSeconds % 60).toString().padStart(2, "0")}`;
+  const hours = Math.floor(safeSeconds / 3600);
+  const minutes = Math.floor(safeSeconds / 60) % 60;
+  const wholeSeconds = Math.floor(safeSeconds % 60);
+  const milliseconds = Math.floor((safeSeconds % 1) * 1000);
+  return `${hours.toString().padStart(2, "0")}:${minutes.toString().padStart(2, "0")}:${wholeSeconds.toString().padStart(2, "0")}.${milliseconds.toString().padStart(3, "0")}`;
 };
 
 export function App() {
@@ -29,12 +33,17 @@ export function App() {
   const [error, setError] = useState("");
   const [info, setInfo] = useState<PlayerInfo>();
   const [currentTime, setCurrentTime] = useState(0);
+  const [mediaInfo, setMediaInfo] = useState<MxfMediaInfo>();
+  const [timecode, setTimecode] = useState<string | null>(null);
+  const [seeking, setSeeking] = useState(false);
 
   const selectFile = (nextFile?: File) => {
     setFile(nextFile);
     setError("");
     setInfo(undefined);
     setCurrentTime(0);
+    setMediaInfo(undefined);
+    setTimecode(null);
     setStatus(nextFile ? "loading" : "idle");
   };
 
@@ -83,6 +92,9 @@ export function App() {
             controls={false}
             libavBase="/libav"
             onReady={setInfo}
+            onMediaInfo={setMediaInfo}
+            onTimecode={setTimecode}
+            onSeekingChange={setSeeking}
             onTimeUpdate={setCurrentTime}
             onStatusChange={setStatus}
             onError={(nextError) => setError(nextError.message)}
@@ -115,8 +127,8 @@ export function App() {
       </section>
 
       <section className="status-grid" aria-live="polite">
-        <div className="panel"><h2>再生状態</h2><strong className={`status status-${status}`}>{statusLabels[status]}</strong></div>
-        <div className="panel"><h2>メディア情報</h2><p>{info ? `${info.width} × ${info.height} / ${info.frameRate} fps / ${info.audioChannels} ch` : "—"}</p></div>
+        <div className="panel"><h2>再生状態</h2><strong className={`status status-${status}`}>{seeking ? "シーク中" : statusLabels[status]}</strong><p>再生位置: {formatTime(currentTime)}</p><p>タイムコード: {timecode ?? "タイムコードなし"}</p></div>
+        <div className="panel"><h2>メディア情報</h2><p>{info ? `${mediaInfo?.video?.width ?? info.width} × ${mediaInfo?.video?.height ?? info.height} / ${mediaInfo?.editRateNumerator && mediaInfo.editRateDenominator ? `${mediaInfo.editRateNumerator}/${mediaInfo.editRateDenominator}` : info.frameRate} fps / ${mediaInfo?.audio?.channels ?? info.audioChannels} ch` : "—"}</p></div>
         <div className="panel error-panel"><h2>エラー</h2><p>{error || "エラーはありません"}</p></div>
       </section>
     </main>
