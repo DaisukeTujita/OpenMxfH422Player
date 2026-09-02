@@ -35,13 +35,49 @@ export default function Preview({ file }: { file: File }) {
 
 `src`には`File`、`Blob`、またはCORSを許可したURLを指定できます。`ref`から`play()`、`pause()`、`seek(seconds)`、`currentTime`、`duration`を利用できます。音声はブラウザのautoplay policyにより通常ユーザー操作後に開始します。シーク時はAudioBufferSourceNodeを指定位置から作り直します。
 
+追加コールバックの `onMediaInfo` はMXFから実際に取得できた構造情報を返し、未取得フィールドは `undefined` のままです。`onTimecode` は現在位置のSMPTEタイムコード、Timecode Trackがない場合は `null` を返します。`onSeekingChange` はシーク処理の開始・終了を通知します。`onBufferingChange` は部分読み込みを導入する次段階とのAPI互換用で、現バージョンではまだ通知されません。
+
+## MXF解析
+
+解析器はPartition PackのOperational Pattern、Header Metadata内のDescriptor/Track系Local Set、およびIndex Table SegmentをEssenceデコードとは分離して走査します。現在、メタデータから次の値を取得できます。
+
+- Operational Pattern、Essence Container UL
+- Stored Width / Stored Height、Aspect Ratio
+- Track Edit Rate、Descriptor Duration
+- Audio Sampling Rate、Channel Count、Quantization Bits
+- Timecode ComponentのStart Timecode、Rounded Timecode Base、Drop Frame、Duration
+- Index Edit Rate、Index Start Position、Index Duration、Edit Unit Byte Count
+- Index EntryのStream Offset、Key Frame Offset、Temporal Offset、Flags
+
+Stream OffsetはJavaScriptの安全な整数範囲に丸めず `bigint` で保持します。異なるMXF生成器がPrimer Packで動的Local Tagを割り当てるケースの完全対応、Codec/Pixel Format ULの網羅的な名称解決、Package参照を辿ったMaterial/Sourceの優先順位付けは今後の拡張対象です。解析できない値に1920×1080等の固定値を代入することはありません。一方、既存デコード経路は従来互換の対象形式に限り、libav codec ID、30000/1001 fps、48 kHz、2 chを引き続き利用します。このフォールバックは再生エンジンの区間デコード化まで既存素材を再生可能に保つための暫定措置です。
+
+## タイムコード表示
+
+サンプル画面はミリ秒単位の再生位置とMXFタイムコードを併記します。Non-Drop Frameに加え、29.97 fps（base 30）と59.94 fps（base 60）のDrop Frame番号を扱い、区切りはDrop Frameでは `;`、Non-Dropでは `:` です。開始タイムコードへ現在の再生フレームを加算し、24時間でラップします。利用可能なTimecode Trackがない場合は「タイムコードなし」と表示し、再生自体は継続します。
+
+### 複数Timecode Trackの選択規則
+
+現段階ではMaterial PackageとSource Packageの参照関係を完全には解決していません。複数のTimecode Trackが見つかった場合は、**MXF内のKLV検出順で最初に現れ、Edit Rateの分子・分母がともに正数であるTrack**を表示に使用します。検出数を`console.debug`へ、複数検出の警告を`console.warn`へ、選択したTrackのStart Timecode（frame値）・Edit Rate・Drop Frameを`console.info`へ出力します。この規則は暫定的なもので、Package参照を解決できるようになった段階でMaterial Package優先へ置き換える予定です。
+
+サンプルの「MXF解析情報」にはOperational Pattern、Essence Container、解像度、Edit Rate、Aspect Ratio、音声Sample Rate、チャンネル数、Quantization Bits、Timecode Track数、選択された開始タイムコード、Drop Frame、Index Table数とEntry総数を表示します。メタデータから取得できなかった項目を再生用固定値で補完せず、「未取得」と表示します。
+
+## Indexとシーク
+
+`findSeekPoint()` は目的Edit Unit以前のRandom Access Pointを選択します。Index Entryがなく固定Edit Unit Byte Countがある場合はオフセットを算出し、Index Tableがない・壊れている場合は `source: "sequential-fallback"` として先頭からの順次走査を明示します。現在のプレイヤー本体は全フレームが既にデコード済みの従来シークを使用しており、Index位置からの部分読み込みとデコーダ再開は後続段階で統合します。
+
+## 読み込み・メモリ設計と段階的移行
+
+現時点のフローは「ファイル全体を `ArrayBuffer` 化 → KLV走査 → 全映像・音声デコード」です。この解析PRだけでは大容量ファイルのメモリ問題はまだ解消していません。次の段階で `RandomAccessReader`（`File.slice()`、AbortSignal、重複要求抑止、LRUチャンクキャッシュ）を導入し、その後に固定長デコードキューと世代付きシークへ切り替えます。予定する既定値は、最大単一read 4 MiB、キャッシュ64 MiB、映像先読み4秒、音声先読み2秒です。シーク時には旧世代のpacket、表示待ちframe、音声bufferを破棄し、ファイルサイズに比例してメモリが増えない構成にします。これらの上限は**設計予定値であり、現実装の保証値ではありません**。
+
+Index Tableがない場合はBody Partition/KLVの既知位置、または先頭から順次走査する安全なフォールバックを使用する予定です。未対応形式はDescriptor情報を含む理解可能なエラーにする予定ですが、現エンジンが受理する範囲は下記の既存形式に限られます。
+
 ## 対応素材
 
 - MXF OP1a / XDCAM HD422、MPEG-2 Video 422P@High、yuv422p
 - 1920×1080、50 Mb/s、30000/1001 fps、top-field-first
 - PCM signed 24-bit / 48 kHz / 2 ch（MXFで一般的なBEと、テスト生成時のLE decoderをWASMへ収録）
 
-入力全体とデコード済みフレームをメモリに保持するため、長尺素材は再生に負荷がかかります。
+入力全体、RGBA化した全映像フレーム、全尺の音声をメモリに保持するため、現在は長尺素材の再生に負荷がかかります。部分読み込み・区間デコードは上記の後続段階で実装します。
 
 ## ライセンスとソース提供
 

@@ -25,6 +25,9 @@ button:disabled { cursor: not-allowed; opacity: .4; }
 .status-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; margin-top: 18px; }
 .status-grid h2 { margin: 0 0 12px; color: #9aa7b8; font-size: .78rem; letter-spacing: .08em; text-transform: uppercase; }
 .status-grid p { margin: 0; }
+.media-inspection dl { display: grid; grid-template-columns: minmax(10rem, auto) minmax(0, 1fr); gap: .35rem 1rem; margin: 0; }
+.media-inspection dt { color: #94a3b8; }
+.media-inspection dd { margin: 0; overflow-wrap: anywhere; }
 .status { color: #65d6ad; }
 .status-error, .error-panel p:not(:empty) { color: #ff8f8f; }
 .error-panel { grid-column: 1 / -1; }

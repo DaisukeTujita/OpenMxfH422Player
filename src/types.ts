@@ -26,6 +26,12 @@ export interface H422PlayerProps {
   libavBase?: string;
   className?: string;
   onReady?: (info: PlayerInfo) => void;
+  /** Structural MXF metadata. Missing fields remain undefined rather than receiving playback fallbacks. */
+  onMediaInfo?: (info: import("./mxf-metadata").MxfMediaInfo) => void;
+  /** Current MXF timecode, or null when no usable Timecode Track exists. */
+  onTimecode?: (timecode: string | null) => void;
+  onBufferingChange?: (buffering: boolean) => void;
+  onSeekingChange?: (seeking: boolean) => void;
   onTimeUpdate?: (seconds: number) => void;
   onStatusChange?: (status: PlayerStatus) => void;
   onError?: (error: Error) => void;

@@ -1,11 +1,28 @@
 import { parseMxf } from "./mxf";
+import { parseMxfMetadata } from "./mxf-metadata";
 import { pcmS24beToFloat32, XDCAM_FRAME_RATE, yuv422pToRgba } from "./media";
+import { timecodeAtSeconds, type MxfTimecodeInfo } from "./timecode";
 import type { PlayerInfo, PlayerStatus } from "./types";
 import { WebGlRenderer } from "./webgl";
 
-interface Callbacks { status(s: PlayerStatus): void; ready(i: PlayerInfo): void; time(t: number): void; error(e: Error): void }
+interface Callbacks { status(s: PlayerStatus): void; ready(i: PlayerInfo): void; time(t: number): void; error(e: Error): void; mediaInfo?(i: import("./mxf-metadata").MxfMediaInfo): void; timecode?(value: string | null): void; seeking?(value: boolean): void }
 type LibAV = Record<string, any>;
 type DecodedFrame = { data?: Uint8Array; layout?: Array<{offset:number; stride:number}>; width: number; height: number; format?: number; pts?: number };
+
+type TimecodeLogger = Pick<Console, "debug" | "info" | "warn">;
+
+/**
+ * Until package references are resolved, preserve KLV discovery order and select
+ * the first track that has a usable Edit Rate. The diagnostics make ambiguity visible.
+ */
+export function selectTimecodeTrack(timecodes: MxfTimecodeInfo[], logger: TimecodeLogger = console): MxfTimecodeInfo | undefined {
+  logger.debug(`[H422Player] detected Timecode Tracks: ${timecodes.length}`);
+  if (timecodes.length > 1) logger.warn(`[H422Player] multiple Timecode Tracks detected (${timecodes.length}); selecting the first usable track in KLV discovery order`);
+  const selected = timecodes.find(value => value.editRateNumerator > 0 && value.editRateDenominator > 0);
+  if (selected) logger.info(`[H422Player] selected Timecode Track: start=${selected.startFrame} edit_rate=${selected.editRateNumerator}/${selected.editRateDenominator} drop_frame=${selected.dropFrame}`);
+  else logger.debug("[H422Player] no Timecode Track with a usable Edit Rate was found");
+  return selected;
+}
 
 export async function loadCustomLibAV(base: string): Promise<LibAV> {
   const normalizedBase = base.replace(/\/$/, "");
@@ -40,6 +57,7 @@ export class PlayerEngine {
   private libav?: LibAV; private renderer: WebGlRenderer; private audio?: AudioContext; private audioBuffer?: AudioBuffer; private audioSource?: AudioBufferSourceNode;
   private status: PlayerStatus="idle"; private startedAt=0; private pausedAt=0; private durationValue=0;
   private frames: Array<{frame: ImageData; time: number}>=[]; private raf=0;
+  private timecodeInfo?: MxfTimecodeInfo;
   constructor(canvas: HTMLCanvasElement, private callbacks: Callbacks, private muted=false, private libavBase="/libav") { this.renderer=new WebGlRenderer(canvas); }
   get currentTime(): number { return this.status === "playing" ? Math.min(this.durationValue,(performance.now()-this.startedAt)/1000) : this.pausedAt; }
   get duration(): number { return this.durationValue; }
@@ -48,7 +66,13 @@ export class PlayerEngine {
     this.setStatus("loading");
     try {
       const blob=typeof source === "string" ? await fetch(source).then(r=>{if(!r.ok)throw new Error(`MXF request failed (${r.status})`);return r.blob();}) : source;
-      const parsed=parseMxf(new Uint8Array(await blob.arrayBuffer()));
+      const bytes=new Uint8Array(await blob.arrayBuffer());
+      const metadata=parseMxfMetadata(bytes);
+      this.timecodeInfo=selectTimecodeTrack(metadata.timecodes);
+      metadata.mediaInfo.selectedTimecode=this.timecodeInfo;
+      this.callbacks.mediaInfo?.(metadata.mediaInfo);
+      this.callbacks.timecode?.(this.timecodeInfo ? timecodeAtSeconds(this.timecodeInfo,0) : null);
+      const parsed=parseMxf(bytes);
       console.info(`[H422Player] video codec_id=${parsed.videoCodec.codecId} codec_name=${parsed.videoCodec.codecName}`);
       if (parsed.audioCodec) console.info(`[H422Player] audio codec_id=${parsed.audioCodec.codecId} codec_name=${parsed.audioCodec.codecName}`);
       this.libav=await loadCustomLibAV(this.libavBase);
@@ -101,8 +125,9 @@ export class PlayerEngine {
   private startAudio(offset:number):void { if(!this.audio||!this.audioBuffer)return; this.audioSource?.stop(); const node=this.audio.createBufferSource(); node.buffer=this.audioBuffer; node.connect(this.audio.destination); node.start(0,Math.min(offset,this.audioBuffer.duration)); this.audioSource=node; }
   async play(): Promise<void> { if(this.status==="playing")return; this.startAudio(this.pausedAt); await this.audio?.resume(); this.startedAt=performance.now()-this.pausedAt*1000; this.setStatus("playing"); this.tick(); }
   pause(): void { if(this.status!=="playing")return; this.pausedAt=this.currentTime; this.audioSource?.stop(); this.audioSource=undefined; void this.audio?.suspend(); cancelAnimationFrame(this.raf); this.setStatus("paused"); }
-  async seek(seconds:number): Promise<void> { this.pausedAt=Math.max(0,Math.min(this.durationValue,seconds)); if(this.status==="playing"){this.startedAt=performance.now()-this.pausedAt*1000;this.startAudio(this.pausedAt);} this.drawAt(this.pausedAt); this.callbacks.time(this.pausedAt); }
+  async seek(seconds:number): Promise<void> { this.callbacks.seeking?.(true); try { this.pausedAt=Math.max(0,Math.min(this.durationValue,seconds)); if(this.status==="playing"){this.startedAt=performance.now()-this.pausedAt*1000;this.startAudio(this.pausedAt);} this.drawAt(this.pausedAt); this.emitTime(this.pausedAt); } finally { this.callbacks.seeking?.(false); } }
+  private emitTime(t:number){this.callbacks.time(t);this.callbacks.timecode?.(this.timecodeInfo ? timecodeAtSeconds(this.timecodeInfo,t) : null);}
   private drawAt(t:number){const f=this.frames[Math.min(this.frames.length-1,Math.floor(t*XDCAM_FRAME_RATE))];if(f)this.renderer.draw(f.frame,f.frame.width,f.frame.height);}
-  private tick=()=>{const t=this.currentTime;this.drawAt(t);this.callbacks.time(t);if(t>=this.durationValue){this.pausedAt=t;this.setStatus("ended");return;}this.raf=requestAnimationFrame(this.tick);};
+  private tick=()=>{const t=this.currentTime;this.drawAt(t);this.emitTime(t);if(t>=this.durationValue){this.pausedAt=t;this.setStatus("ended");return;}this.raf=requestAnimationFrame(this.tick);};
   destroy():void{cancelAnimationFrame(this.raf);this.audioSource?.stop();void this.audio?.close();this.frames=[];}
 }

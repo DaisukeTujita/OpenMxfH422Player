@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { loadCustomLibAV, PlayerEngine } from "./engine";
+import { loadCustomLibAV, PlayerEngine, selectTimecodeTrack } from "./engine";
 
 function moduleUrl(source: string): string {
   return `data:text/javascript,${encodeURIComponent(source)}`;
@@ -114,5 +114,23 @@ describe("PlayerEngine decoder cleanup", () => {
 
     await expect(decoderHarness(av).decodeVideo([], 2)).rejects.toBe(cleanupError);
     expect(av.ff_free_decoder).toHaveBeenCalledOnce();
+  });
+});
+
+describe("selectTimecodeTrack", () => {
+  const first = { startFrame: 100, roundedTimecodeBase: 30, dropFrame: false, editRateNumerator: 30000, editRateDenominator: 1001 };
+  const second = { startFrame: 200, roundedTimecodeBase: 30, dropFrame: true, editRateNumerator: 30000, editRateDenominator: 1001 };
+
+  it("logs the count, warns about ambiguity, and describes the selected first usable track", () => {
+    const logger = { debug: vi.fn(), info: vi.fn(), warn: vi.fn() };
+    expect(selectTimecodeTrack([first, second], logger)).toBe(first);
+    expect(logger.debug).toHaveBeenCalledWith("[H422Player] detected Timecode Tracks: 2");
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("multiple Timecode Tracks detected (2)"));
+    expect(logger.info).toHaveBeenCalledWith("[H422Player] selected Timecode Track: start=100 edit_rate=30000/1001 drop_frame=false");
+  });
+
+  it("skips a track without an Edit Rate but retains discovery order", () => {
+    const logger = { debug: vi.fn(), info: vi.fn(), warn: vi.fn() };
+    expect(selectTimecodeTrack([{ ...first, editRateNumerator: 0 }, second], logger)).toBe(second);
   });
 });
