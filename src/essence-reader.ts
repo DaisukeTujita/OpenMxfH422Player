@@ -13,7 +13,7 @@ export interface EssenceIndexEntry {
   keyFrameOffset?: number; temporalOffset?: number; flags?: number; isRandomAccessPoint?: boolean;
 }
 export interface EssenceIndex { packets: EssenceIndexEntry[]; partitions: MxfPartitionInfo[]; frameRate: number }
-export interface EssenceRangeOptions { startFrame: number; endFrame: number; prerollFrames?: number; signal?: AbortSignal; maxReadSize?: number; kinds?: Array<EssenceIndexEntry["kind"]> }
+export interface EssenceRangeOptions { startFrame: number; endFrame: number; prerollFrames?: number; signal?: AbortSignal; maxReadSize?: number; kinds?: Array<EssenceIndexEntry["kind"]>; trackNumbers?:number[] }
 export interface ReadEssencePacket extends EssenceIndexEntry { data: Uint8Array }
 type EntryLookup = Map<number, MxfIndexTable["entries"][number]>;
 
@@ -104,7 +104,7 @@ export async function readEssenceRange(reader: RandomAccessReader, index: Essenc
   const start = Math.max(0, Math.trunc(options.startFrame)), end = Math.max(start, Math.trunc(options.endFrame));
   const decodeStart = essenceDecodeStart(index, start, options.prerollFrames), max = options.maxReadSize ?? DEFAULT_ESSENCE_READ_SIZE;
   if (!Number.isSafeInteger(max) || max <= 0) throw new RangeError("maxReadSize must be positive");
-  const kinds = new Set(options.kinds ?? ["video", "audio"]), selected = index.packets.filter(packet => kinds.has(packet.kind) && packet.editUnit >= decodeStart && packet.editUnit <= end);
+  const kinds = new Set(options.kinds ?? ["video", "audio"]), tracks=options.trackNumbers&&new Set(options.trackNumbers), selected = index.packets.filter(packet => kinds.has(packet.kind) && (!tracks||tracks.has(packet.trackNumber)) && packet.editUnit >= decodeStart && packet.editUnit <= end);
   const result: ReadEssencePacket[] = [];
   for (const packet of selected) { if (options.signal?.aborted) throw abortError(); result.push({ ...packet, data: await readValue(reader, packet, max, options.signal) }); }
   return result;

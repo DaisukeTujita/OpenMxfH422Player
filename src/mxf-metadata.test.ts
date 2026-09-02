@@ -16,11 +16,11 @@ describe("parseMxfMetadata", () => {
   it("detects descriptor format values and Timecode Track fields", () => {
     const descriptor = klv(metadataKey, concat(
       field(0x4b01, rational(30000, 1001)), field(0x3203, be32(1920)), field(0x3202, be32(1080)),
-      field(0x320e, rational(16, 9)), field(0x3d03, rational(48000, 1)), field(0x3d07, be32(2)), field(0x3d01, be32(24)),
+      field(0x320e, rational(16, 9)), field(0x3d03, rational(48000, 1)), field(0x3d07, be32(2)), field(0x3d01, be32(24)), field(0x3d0a, bytes(0,6)), field(0x3d06, bytes(6,14,43,52,4,1,1,1,4,2,2,1,1,0,0,0)),
       field(0x1501, be64(1_080_000n)), field(0x1502, bytes(0, 30)), field(0x1503, bytes(1)), field(0x0202, be64(900n)),
     ));
     const parsed = parseMxfMetadata(descriptor);
-    expect(parsed.mediaInfo).toMatchObject({ editRateNumerator: 30000, editRateDenominator: 1001, video: { width: 1920, height: 1080, aspectRatio: "16:9" }, audio: { sampleRate: 48000, channels: 2, bitsPerSample: 24 } });
+    expect(parsed.mediaInfo).toMatchObject({ editRateNumerator: 30000, editRateDenominator: 1001, video: { width: 1920, height: 1080, aspectRatio: "16:9" }, audio: { sampleRate: 48000, channels: 2, bitsPerSample: 24, blockAlign:6, essenceCodingUl:"060e2b34040101010402020101000000" } });
     expect(parsed.mediaInfo.timecodeTrackCount).toBe(1);
     expect(parsed.timecodes[0]).toEqual({ startFrame: 1_080_000, roundedTimecodeBase: 30, dropFrame: true, editRateNumerator: 30000, editRateDenominator: 1001, durationFrames: 900 });
   });
