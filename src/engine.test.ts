@@ -213,6 +213,27 @@ describe("PlayerEngine streaming mode",()=>{
   it("does not auto-resume after pause while buffering",()=>{
     vi.stubGlobal("cancelAnimationFrame",vi.fn());const h=streamingPlaybackHarness();h.engine.status="buffering";h.engine.buffering=true;h.engine.resumeAfterBuffer=true;h.engine.abortFill=vi.fn();h.engine.pause();expect(h.engine.resumeAfterBuffer).toBe(false);expect(h.engine.status).toBe("paused");expect(h.callbacks.buffering).toHaveBeenLastCalledWith(false);
   });
+
+  it("ends once when the last frame is one frame before duration",()=>{
+    vi.stubGlobal("requestAnimationFrame",vi.fn(()=>1));vi.stubGlobal("cancelAnimationFrame",vi.fn());vi.spyOn(performance,"now").mockReturnValue(9967);
+    const h=streamingPlaybackHarness();h.engine.durationValue=10;h.engine.essenceIndex={frameRate:30,packets:[{kind:"video",editUnit:299}]};h.engine.queuedThroughFrame=299;h.engine.frames=[{frame:{width:2,height:2},time:299/30}];h.engine.requestFill=vi.fn();h.engine.tick();h.engine.tick();
+    expect(h.engine.status).toBe("ended");expect(h.engine.pausedAt).toBe(10);expect(h.engine.requestFill).not.toHaveBeenCalled();expect(h.callbacks.status.mock.calls.filter((call:any[])=>call[0]==="ended")).toHaveLength(1);expect(h.callbacks.time).toHaveBeenLastCalledWith(10);expect(h.callbacks.timecode).toHaveBeenLastCalledWith(null);expect(h.callbacks.buffering).not.toHaveBeenCalledWith(true);
+  });
+
+  it("moves the current generation to error when a background fill fails",async()=>{
+    vi.stubGlobal("cancelAnimationFrame",vi.fn());const h=streamingPlaybackHarness();h.engine.buffering=true;h.engine.fillStreaming=vi.fn().mockRejectedValue(new Error("read failed"));h.engine.requestFill(0);await Promise.resolve();await Promise.resolve();
+    expect(h.engine.status).toBe("error");expect(h.callbacks.error).toHaveBeenCalledWith(expect.objectContaining({message:"read failed"}));expect(h.callbacks.buffering).toHaveBeenCalledWith(false);expect(h.engine.resumeAfterBuffer).toBe(false);
+  });
+
+  it("ignores stale and post-destroy fill failures",async()=>{
+    vi.stubGlobal("cancelAnimationFrame",vi.fn());const h=streamingPlaybackHarness(),failure=gate();h.engine.fillStreaming=vi.fn(async()=>{failure.open();await failure.wait;throw new Error("late decode failure");});h.engine.requestFill(0);await failure.entered;h.engine.seekGeneration++;h.engine.destroyed=true;failure.release();await Promise.resolve();await Promise.resolve();
+    expect(h.callbacks.error).not.toHaveBeenCalled();expect(h.callbacks.status).not.toHaveBeenCalledWith("error");
+  });
+
+  it("an old load cleanup cannot destroy the replacement reader",()=>{
+    const h=streamingPlaybackHarness(),a={destroy:vi.fn()},b={destroy:vi.fn()};h.engine.reader=a;h.engine.releaseReader(a);h.engine.reader=b;h.engine.releaseReader(a);
+    expect(a.destroy).toHaveBeenCalledOnce();expect(b.destroy).not.toHaveBeenCalled();expect(h.engine.reader).toBe(b);
+  });
 });
 
 function playbackHarness() {
