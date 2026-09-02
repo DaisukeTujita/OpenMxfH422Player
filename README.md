@@ -65,7 +65,7 @@ export default function Preview({ file }: { file: File }) {
 1秒より古いRGBAフレームを破棄し、seek時は旧要求をAbortしてseek先付近だけを再取得します。
 `ref.getDiagnostics()` と `onDiagnostics` からReader I/O、キャッシュ、キュー、世代を確認できます。
 
-streaming音声はDescriptorが **48 kHz / 24-bit / 2 ch** でSound Essence packetが存在する場合に、PCM S24BE（BlockAlign 6 byte、big-endian）として対応します。複数トラックはKLV検出順の最初のステレオtrackNumberを選び、選択理由をログへ出します。Descriptorが欠落または不一致なら固定値で推測せず、理由を警告して映像のみ再生へフォールバックします。音声はReaderから3秒先まで（単一read最大4 MiB）だけ取得し、約0.75秒のAudioBufferへ変換します。残量1.25秒で補充し、再生済み区間を破棄するため未再生キューは概ね3秒（補充中も最大約5秒）です。AudioContextを予約時計にして各区間を隙間なく予約し、pause/seek/buffering/endedでは全Nodeをstop・disconnect、復旧時は同一media timeからNodeを作り直します。音声には映像prerollを適用せず、seek packet内も6-byte境界で切り出し、映像durationを越えて予約しません。映像または対応音声が枯渇した場合は再生時計を停止してbufferingを通知し、補充後に同じ位置から再開します。Index Tableの
+streaming音声はDescriptorが **48 kHz / 24-bit / 2 ch** でSound Essence packetが存在する場合に、PCM S24BE（BlockAlign 6 byte、big-endian）として対応します。複数トラックはKLV検出順の最初のステレオtrackNumberを選び、選択理由をログへ出します。Descriptorが欠落または不一致なら固定値で推測せず、理由を警告して映像のみ再生へフォールバックします。音声はReaderから3秒先まで（単一read最大4 MiB）だけ取得し、約0.75秒のAudioBufferへ変換します。残量1.25秒で補充し、再生済み区間を破棄するため未再生キューは概ね3秒（補充中も最大約5秒）です。performance.now()を映像・media timeのマスター時計、AudioContextを音声予約時計として使用し、audioVideoDriftMsで差を監視します。開始時は両時計を30 ms後の同一点へ揃えます。各区間はmedia timeアンカーから予約し（大きな無音区間を詰めず）、pause/seek/buffering/endedでは全Nodeをstop・disconnect、復旧時は同一media timeからNodeを作り直します。音声には映像prerollを適用せず、seek packet内も6-byte境界で切り出し、映像durationを越えて予約しません。映像または対応音声が枯渇した場合は再生時計を停止してbufferingを通知し、補充後に同じ位置から再開します。Index Tableの
 `StreamOffset`はBodySIDのEssence Container stream先頭を基準とする相対値であり、Partitionの
 絶対位置へ単純加算できません。本実装は推測による直接変換をせず、安全なKLVヘッダー順次索引へ
 フォールバックします。このためEssence Valueのメモリ化は避けますが、初回の物理I/O時間は

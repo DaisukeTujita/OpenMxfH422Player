@@ -8,6 +8,7 @@ export interface PlayerDiagnostics {
   streamingAudioSupported: boolean; selectedAudioTrackNumber: number | null;
   audioSampleRate: number | null; audioChannels: number | null; audioQueueStart: number | null;
   audioQueueEnd: number | null; audioVideoDriftMs: number | null; audioBytesLoaded: number;
+  audioQueuedThroughTime: number; audioExhausted: boolean; lastPlayableAudioTime: number | null;
 }
 
 export interface PlayerInfo {

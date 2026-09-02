@@ -42,6 +42,7 @@ export function App() {
   const [mediaInfo, setMediaInfo] = useState<MxfMediaInfo>();
   const [timecode, setTimecode] = useState<string | null>(null);
   const [seeking, setSeeking] = useState(false);
+  const [buffering, setBuffering] = useState(false);
   const [mode,setMode]=useState<PlaybackMode>("legacy");
   const [diagnostics,setDiagnostics]=useState<PlayerDiagnostics>();
   const selectedStartTimecode = mediaInfo?.selectedTimecode
@@ -56,6 +57,7 @@ export function App() {
     setMediaInfo(undefined);
     setTimecode(null);
     setStatus(nextFile ? "loading" : "idle");
+    setBuffering(false);
   };
 
   const play = async () => {
@@ -87,13 +89,13 @@ export function App() {
       </header>
 
       <section className="panel file-panel">
-        <label>再生方式 <select value={mode} onChange={event=>setMode(event.target.value as PlaybackMode)}><option value="legacy">legacy（安定版）</option><option value="streaming">streaming（実験的）</option></select></label>
+        <label>再生方式 <select value={mode} onChange={event=>{setBuffering(false);setMode(event.target.value as PlaybackMode);}}><option value="legacy">legacy（安定版）</option><option value="streaming">streaming（実験的）</option></select></label>
         <label className="file-picker">
           <span>MXFファイルを選択</span>
           <input type="file" accept=".mxf,application/mxf" onChange={(event) => selectFile(event.target.files?.[0])} />
         </label>
         <span className="filename">{file?.name ?? "ファイルが選択されていません"}</span>
-        {mode === "streaming" && <strong>実験的な映像のみモードです（音声は再生されません）</strong>}
+        {mode === "streaming" && <strong>実験的な部分読み込みモードです。対応音声: PCM S24BE / 48 kHz / 24-bit / stereo。未対応音声形式では映像のみ再生します</strong>}
       </section>
 
       <section className="viewer" aria-label="MXF player">
@@ -106,6 +108,7 @@ export function App() {
             libavBase="/libav"
             mode={mode}
             onDiagnostics={setDiagnostics}
+            onBufferingChange={setBuffering}
             onReady={setInfo}
             onMediaInfo={setMediaInfo}
             onTimecode={setTimecode}
@@ -161,7 +164,7 @@ export function App() {
           </dl>
         </div>
         <div className="panel error-panel"><h2>エラー</h2><p>{error || "エラーはありません"}</p></div>
-        <div className="panel"><h2>Streaming診断</h2><p>方式: {mode}</p><p>ファイル: {diagnostics?.fileSize??0} bytes</p><p>Reader: {diagnostics?.bytesLoaded??0} bytes / {diagnostics?.underlyingReadCount??0} reads</p><p>キャッシュ: {diagnostics?.cacheBytes??0} bytes</p><p>映像キュー: {diagnostics?.videoQueueFrames??0} frames ({diagnostics?.videoQueueStart?.toFixed(2)??"-"}–{diagnostics?.videoQueueEnd?.toFixed(2)??"-"}s)</p><p>音声状態: {mode!=="streaming"?"legacy":buffering?"buffering中":diagnostics?.streamingAudioSupported?(status==="playing"?"対応・再生中":"対応"):mediaInfo?.audio?"未対応形式のため映像のみ":"音声なし"}</p><p>音声形式: {diagnostics?.audioSampleRate??"-"} Hz / {diagnostics?.audioChannels??"-"} ch / track {diagnostics?.selectedAudioTrackNumber??"-"}</p><p>音声キュー: {diagnostics?.audioQueueStart?.toFixed(2)??"-"}–{diagnostics?.audioQueueEnd?.toFixed(2)??"-"}s / {diagnostics?.scheduledAudioRanges??0} nodes / {diagnostics?.audioBytesLoaded??0} bytes</p><p>A/V drift: {diagnostics?.audioVideoDriftMs?.toFixed(1)??"-"} ms</p><p>世代: load {diagnostics?.loadGeneration??0} / seek {diagnostics?.seekGeneration??0}</p></div>
+        <div className="panel"><h2>Streaming診断</h2><p>方式: {mode}</p><p>ファイル: {diagnostics?.fileSize??0} bytes</p><p>Reader: {diagnostics?.bytesLoaded??0} bytes / {diagnostics?.underlyingReadCount??0} reads</p><p>キャッシュ: {diagnostics?.cacheBytes??0} bytes</p><p>映像キュー: {diagnostics?.videoQueueFrames??0} frames ({diagnostics?.videoQueueStart?.toFixed(2)??"-"}–{diagnostics?.videoQueueEnd?.toFixed(2)??"-"}s)</p><p>音声状態: {mode!=="streaming"?"legacy":buffering?"buffering中":diagnostics?.streamingAudioSupported?(status==="playing"?"対応・再生中":"対応"):mediaInfo?.audio?"未対応形式のため映像のみ":"音声なし"}</p><p>音声形式: {diagnostics?.audioSampleRate??"-"} Hz / {diagnostics?.audioChannels??"-"} ch / track {diagnostics?.selectedAudioTrackNumber??"-"}</p><p>音声キュー: {diagnostics?.audioQueueStart?.toFixed(2)??"-"}–{diagnostics?.audioQueueEnd?.toFixed(2)??"-"}s / {diagnostics?.scheduledAudioRanges??0} nodes / {diagnostics?.audioBytesLoaded??0} bytes / {diagnostics?.audioExhausted?"終端":"補充中"}</p><p>A/V drift: {diagnostics?.audioVideoDriftMs?.toFixed(1)??"-"} ms</p><p>世代: load {diagnostics?.loadGeneration??0} / seek {diagnostics?.seekGeneration??0}</p></div>
       </section>
     </main>
   );
