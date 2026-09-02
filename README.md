@@ -8,6 +8,8 @@ MXFメタデータ、Partition Pack、Random Index Pack、Index Table Segmentの
 単一`read()`最大4 MiBです。同一チャンクの同時要求共有、AbortSignal、統計取得に
 対応し、各値は`FileRandomAccessReader`のオプションで変更できます。RIPがない、
 または壊れている場合は、KLV ValueをLengthで読み飛ばす安全な順次走査を行います。
+有効なRIPがある場合は全域を順次走査せず、RIPが示す各Partition Packと、
+Partition Pack直後の`HeaderByteCount`および`IndexByteCount`範囲だけを解析します。
 
 これは**ストリーミング再生対応ではありません**。映像・音声デコードの互換経路は
 メタデータ調査後にまだファイル全体の連続バッファを作るため、プレイヤー全体の

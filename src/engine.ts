@@ -1,6 +1,6 @@
-import { parseMxf } from "./mxf";
+import { parseMxf, type ParsedMxf } from "./mxf";
 import { parseMxfMetadataFromReader } from "./mxf-reader";
-import { FileRandomAccessReader } from "./random-access-reader";
+import { FileRandomAccessReader, type RandomAccessReader } from "./random-access-reader";
 import { pcmS24beToFloat32, XDCAM_FRAME_RATE, yuv422pToRgba } from "./media";
 import { timecodeAtSeconds, type MxfTimecodeInfo } from "./timecode";
 import type { PlayerInfo, PlayerStatus } from "./types";
@@ -9,6 +9,18 @@ import { WebGlRenderer } from "./webgl";
 interface Callbacks { status(s: PlayerStatus): void; ready(i: PlayerInfo): void; time(t: number): void; error(e: Error): void; mediaInfo?(i: import("./mxf-metadata").MxfMediaInfo): void; timecode?(value: string | null): void; seeking?(value: boolean): void }
 type LibAV = Record<string, any>;
 type DecodedFrame = { data?: Uint8Array; layout?: Array<{offset:number; stride:number}>; width: number; height: number; format?: number; pts?: number };
+type RenderFrame = {frame: ImageData; time: number};
+export interface PlayerEngineDependencies {
+  createReader(blob: Blob): RandomAccessReader & {destroy():void};
+  parseMetadata(reader: RandomAccessReader, signal: AbortSignal): ReturnType<typeof parseMxfMetadataFromReader>;
+  readWhole(blob: Blob): Promise<Uint8Array>;
+  parse(bytes: Uint8Array): ParsedMxf;
+  loadLibav(base: string): Promise<LibAV>;
+}
+const defaultDependencies: PlayerEngineDependencies = {
+  createReader: blob=>new FileRandomAccessReader(blob), parseMetadata:(reader,signal)=>parseMxfMetadataFromReader(reader,{signal}),
+  readWhole:async blob=>new Uint8Array(await blob.slice(0,blob.size).arrayBuffer()), parse:parseMxf, loadLibav:loadCustomLibAV,
+};
 
 type TimecodeLogger = Pick<Console, "debug" | "info" | "warn">;
 
@@ -59,46 +71,51 @@ export class PlayerEngine {
   private status: PlayerStatus="idle"; private startedAt=0; private pausedAt=0; private durationValue=0;
   private frames: Array<{frame: ImageData; time: number}>=[]; private raf=0;
   private timecodeInfo?: MxfTimecodeInfo;
-  private loadController?: AbortController; private destroyed=false;
-  constructor(canvas: HTMLCanvasElement, private callbacks: Callbacks, private muted=false, private libavBase="/libav") { this.renderer=new WebGlRenderer(canvas); }
+  private loadController?: AbortController; private destroyed=false; private loadGeneration=0;
+  private readonly dependencies: PlayerEngineDependencies;
+  constructor(canvas: HTMLCanvasElement, private callbacks: Callbacks, private muted=false, private libavBase="/libav", dependencies: Partial<PlayerEngineDependencies>={}) { this.renderer=new WebGlRenderer(canvas);this.dependencies={...defaultDependencies,...dependencies}; }
   get currentTime(): number { return this.status === "playing" ? Math.min(this.durationValue,(performance.now()-this.startedAt)/1000) : this.pausedAt; }
   get duration(): number { return this.durationValue; }
   private setStatus(s: PlayerStatus) { this.status=s; this.callbacks.status(s); }
   async load(source: File|Blob|string): Promise<void> {
-    this.loadController?.abort(); const controller=new AbortController(); this.loadController=controller; const {signal}=controller;
+    this.loadController?.abort(); const controller=new AbortController(); this.loadController=controller; const {signal}=controller, generation=++this.loadGeneration;
+    const current=()=>!signal.aborted&&!this.destroyed&&this.loadGeneration===generation;
     this.setStatus("loading");
     try {
       const blob=typeof source === "string" ? await fetch(source,{signal}).then(r=>{if(!r.ok)throw new Error(`MXF request failed (${r.status})`);return r.blob();}) : source;
-      const reader=new FileRandomAccessReader(blob);
-      const metadata=await parseMxfMetadataFromReader(reader,{signal});
-      if(signal.aborted||this.destroyed)return;
-      this.timecodeInfo=selectTimecodeTrack(metadata.timecodes);
-      metadata.mediaInfo.selectedTimecode=this.timecodeInfo;
-      this.callbacks.mediaInfo?.(metadata.mediaInfo);
-      this.callbacks.timecode?.(this.timecodeInfo ? timecodeAtSeconds(this.timecodeInfo,0) : null);
+      if(!current())return;
+      const reader=this.dependencies.createReader(blob);
+      let metadata;
+      try { metadata=await this.dependencies.parseMetadata(reader,signal); }
+      finally { reader.destroy(); }
+      if(!current())return;
+      const timecodeInfo=selectTimecodeTrack(metadata.timecodes);
+      metadata.mediaInfo.selectedTimecode=timecodeInfo;
       // PR 2 compatibility path: decoding still needs one contiguous buffer.
-      const bytes=new Uint8Array(await blob.slice(0,blob.size).arrayBuffer());
-      if(signal.aborted||this.destroyed)return;
-      const parsed=parseMxf(bytes);
+      const bytes=await this.dependencies.readWhole(blob);
+      if(!current())return;
+      const parsed=this.dependencies.parse(bytes);
       console.info(`[H422Player] video codec_id=${parsed.videoCodec.codecId} codec_name=${parsed.videoCodec.codecName}`);
       if (parsed.audioCodec) console.info(`[H422Player] audio codec_id=${parsed.audioCodec.codecId} codec_name=${parsed.audioCodec.codecName}`);
-      this.libav=await loadCustomLibAV(this.libavBase);
-      if (await this.libav.libavjs_with_swscale?.() !== 1) throw new Error("Custom libav.js was built without swscale");
+      const libav=await this.dependencies.loadLibav(this.libavBase); if(!current())return;
+      if (await libav.libavjs_with_swscale?.() !== 1) throw new Error("Custom libav.js was built without swscale"); if(!current())return;
       const video=parsed.packets.filter(p=>p.kind==="video"); const audio=parsed.packets.filter(p=>p.kind==="audio");
-      await this.decodeVideo(video.map(p=>p.data), parsed.videoCodec.codecId);
-      if (audio.length && !this.muted) await this.preparePcm(audio.map(p=>p.data));
-      this.durationValue=this.frames.length/XDCAM_FRAME_RATE;
-      const first=this.frames[0]; if (!first) throw new Error("The MPEG-2 decoder returned no frames");
+      const frames=await this.decodeVideo(video.map(p=>p.data), parsed.videoCodec.codecId,libav); if(!current())return;
+      const prepared=audio.length&&!this.muted ? await this.preparePcm(audio.map(p=>p.data)) : undefined;
+      if(!current()){if(prepared)void prepared.audio.close();return;}
+      const duration=frames.length/XDCAM_FRAME_RATE, first=frames[0]; if (!first) { if(prepared)void prepared.audio.close(); throw new Error("The MPEG-2 decoder returned no frames"); }
+      this.libav=libav;this.frames=frames;this.timecodeInfo=timecodeInfo;this.durationValue=duration;
+      if(prepared){this.audio=prepared.audio;this.audioBuffer=prepared.audioBuffer;}
       this.renderer.draw(first.frame,first.frame.width,first.frame.height);
-      this.callbacks.ready({width:first.frame.width,height:first.frame.height,frameRate:XDCAM_FRAME_RATE,duration:this.durationValue,audioSampleRate:48000,audioChannels:audio.length?2:0});
+      this.callbacks.mediaInfo?.(metadata.mediaInfo);this.callbacks.timecode?.(timecodeInfo ? timecodeAtSeconds(timecodeInfo,0) : null);
+      this.callbacks.ready({width:first.frame.width,height:first.frame.height,frameRate:XDCAM_FRAME_RATE,duration,audioSampleRate:48000,audioChannels:audio.length?2:0});
       this.setStatus("ready");
-    } catch (e) { const error=e instanceof Error?e:new Error(String(e)); if(error.name==="AbortError"||signal.aborted)return; this.setStatus("error"); this.callbacks.error(error); throw error; }
+    } catch (e) { const error=e instanceof Error?e:new Error(String(e)); if(error.name==="AbortError"||!current())return; this.setStatus("error"); this.callbacks.error(error); throw error; }
   }
-  private async decodeVideo(chunks: Uint8Array[], codecId: number): Promise<void> {
-    const av=this.libav!;
+  private async decodeVideo(chunks: Uint8Array[], codecId: number, av: LibAV=this.libav!): Promise<RenderFrame[]> {
     // ff_init_decoder receives the codec_id detected for the MXF essence (AV_CODEC_ID_MPEG2VIDEO=2).
     const [,ctx,pkt,frame]=await av.ff_init_decoder(codecId);
-    let decodeFailure: { error: unknown }|undefined;
+    let decodeFailure: { error: unknown }|undefined; const frames: RenderFrame[]=[];
     try {
       const packets=chunks.map((data,i)=>({data,pts:i,time_base_num:1001,time_base_den:30000}));
       const decoded=await av.ff_decode_multi(ctx,pkt,frame,packets,true) as DecodedFrame[];
@@ -113,7 +130,7 @@ export class PlayerEngine {
         };
         const chromaWidth=Math.ceil(f.width/2);
         const rgba=yuv422pToRgba(plane(0,f.width),plane(1,chromaWidth),plane(2,chromaWidth),f.width,f.height);
-        this.frames.push({frame:new ImageData(new Uint8ClampedArray(rgba),f.width,f.height),time:i/XDCAM_FRAME_RATE});
+        frames.push({frame:new ImageData(new Uint8ClampedArray(rgba),f.width,f.height),time:i/XDCAM_FRAME_RATE});
       }
     } catch (error) {
       decodeFailure={error};
@@ -121,13 +138,14 @@ export class PlayerEngine {
     try { await av.ff_free_decoder(ctx,pkt,frame); }
     catch (error) { if (!decodeFailure) throw error; }
     if (decodeFailure) throw decodeFailure.error;
+    return frames;
   }
-  private async preparePcm(chunks: Uint8Array[]): Promise<void> {
-    this.audio=new AudioContext({sampleRate:48000});
+  private async preparePcm(chunks: Uint8Array[]): Promise<{audio:AudioContext;audioBuffer:AudioBuffer}> {
+    const audio=new AudioContext({sampleRate:48000});
     const bytes=chunks.reduce((n,c)=>n+c.length,0), joined=new Uint8Array(bytes); let at=0;
     for(const c of chunks){joined.set(c,at);at+=c.length;}
-    const channels=pcmS24beToFloat32(joined,2); this.audioBuffer=this.audio.createBuffer(2,channels[0].length,48000);
-    channels.forEach((samples,index)=>this.audioBuffer!.copyToChannel(new Float32Array(samples),index)); await this.audio.suspend();
+    const channels=pcmS24beToFloat32(joined,2), audioBuffer=audio.createBuffer(2,channels[0].length,48000);
+    channels.forEach((samples,index)=>audioBuffer.copyToChannel(new Float32Array(samples),index)); await audio.suspend(); return {audio,audioBuffer};
   }
   private startAudio(offset:number):void { if(!this.audio||!this.audioBuffer)return; this.audioSource?.stop(); const node=this.audio.createBufferSource(); node.buffer=this.audioBuffer; node.connect(this.audio.destination); node.start(0,Math.min(offset,this.audioBuffer.duration)); this.audioSource=node; }
   async play(): Promise<void> { if(this.status==="playing")return; this.startAudio(this.pausedAt); await this.audio?.resume(); this.startedAt=performance.now()-this.pausedAt*1000; this.setStatus("playing"); this.tick(); }
@@ -136,5 +154,5 @@ export class PlayerEngine {
   private emitTime(t:number){this.callbacks.time(t);this.callbacks.timecode?.(this.timecodeInfo ? timecodeAtSeconds(this.timecodeInfo,t) : null);}
   private drawAt(t:number){const f=this.frames[Math.min(this.frames.length-1,Math.floor(t*XDCAM_FRAME_RATE))];if(f)this.renderer.draw(f.frame,f.frame.width,f.frame.height);}
   private tick=()=>{const t=this.currentTime;this.drawAt(t);this.emitTime(t);if(t>=this.durationValue){this.pausedAt=t;this.setStatus("ended");return;}this.raf=requestAnimationFrame(this.tick);};
-  destroy():void{this.destroyed=true;this.loadController?.abort();cancelAnimationFrame(this.raf);this.audioSource?.stop();void this.audio?.close();this.frames=[];}
+  destroy():void{this.destroyed=true;this.loadGeneration++;this.loadController?.abort();cancelAnimationFrame(this.raf);this.audioSource?.stop();void this.audio?.close();this.frames=[];}
 }

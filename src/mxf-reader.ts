@@ -21,21 +21,62 @@ async function ripOffsets(reader: RandomAccessReader, signal?: AbortSignal): Pro
   if (reader.size < 20n) return;
   const tail = await reader.read(reader.size - 4n, 4, signal), length = BigInt(u32(tail, 0));
   if (length < 20n || length > reader.size || length > 4n * 1024n * 1024n) return;
-  const bytes = await reader.read(reader.size - length, Number(length), signal);
-  if (!hex(bytes.subarray(0, 16)).startsWith("060e2b34020501010d0102010111")) return;
+  const ripOffset = reader.size - length, header = await readKlvHeader(reader, ripOffset, signal);
+  if (!hex(header.key).startsWith("060e2b34020501010d0102010111") || header.nextOffset !== reader.size) return;
+  const bytes = await reader.read(ripOffset, Number(length), signal);
   // RIP entries are (BodySID:uint32, ByteOffset:uint64); trailing uint32 is total RIP length.
   const first = bytes[16], ber = (first & 0x80) ? 1 + (first & 0x7f) : 1, valueStart = 16 + ber;
+  if ((bytes.length - 4 - valueStart) % 12 !== 0) return;
   const offsets: bigint[] = []; for (let at = valueStart; at + 12 <= bytes.length - 4; at += 12) offsets.push(u64(bytes, at + 4));
-  return offsets.length ? offsets : undefined;
+  if (!offsets.length || offsets.some((offset, index) => offset >= ripOffset || (index > 0 && offset <= offsets[index - 1]))) return;
+  return offsets;
+}
+
+function checkedEnd(start: bigint, length: bigint, size: bigint, label: string): bigint {
+  if (length < 0n || start < 0n || start > size || length > size - start) throw new Error(`${label} range exceeds file size`);
+  return start + length;
+}
+
+async function parseRange(reader: RandomAccessReader, start: bigint, end: bigint, result: MxfMetadataResult, rates: Array<readonly [number, number]>, max: number, signal?: AbortSignal): Promise<void> {
+  let offset = start;
+  while (offset < end) {
+    const header = await readKlvHeader(reader, offset, signal);
+    if (header.nextOffset > end) throw new Error("KLV exceeds declared partition range");
+    if (isMetadata(header.key) && header.valueLength <= BigInt(max)) parseMxfMetadataKlv(result, header.key, await readKlvValue(reader, header, max, signal), rates);
+    offset = header.nextOffset;
+  }
+}
+
+async function parseFromRip(reader: RandomAccessReader, offsets: bigint[], result: MxfMetadataResult, rates: Array<readonly [number, number]>, max: number, signal?: AbortSignal): Promise<MxfPartitionInfo[]> {
+  const partitions: MxfPartitionInfo[] = [];
+  for (const offset of offsets) {
+    const header = await readKlvHeader(reader, offset, signal);
+    if (!isPartition(header.key) || header.valueLength > BigInt(max)) throw new Error("RIP points to an invalid Partition Pack");
+    const value = await readKlvValue(reader, header, max, signal), info = partition(offset, header.key, value);
+    partitions.push(info); parseMxfMetadataKlv(result, header.key, value, rates);
+    const headerEnd = checkedEnd(header.nextOffset, info.headerByteCount ?? 0n, reader.size, "Header Metadata");
+    const indexEnd = checkedEnd(headerEnd, info.indexByteCount ?? 0n, reader.size, "Index");
+    if (info.headerByteCount) await parseRange(reader, header.nextOffset, headerEnd, result, rates, max, signal);
+    if (info.indexByteCount) await parseRange(reader, headerEnd, indexEnd, result, rates, max, signal);
+  }
+  return partitions;
 }
 
 /** Parses metadata and index KLVs while skipping essence values by their BER lengths. */
 export async function parseMxfMetadataFromReader(reader: RandomAccessReader, options: { signal?: AbortSignal; maxMetadataValueSize?: number } = {}): Promise<MxfReaderResult> {
   const { signal } = options, max = options.maxMetadataValueSize ?? 4 * 1024 * 1024;
-  const result = createMxfMetadataResult(), rates: Array<readonly [number, number]> = [], partitions: MxfPartitionInfo[] = [];
+  let result = createMxfMetadataResult(), rates: Array<readonly [number, number]> = [], partitions: MxfPartitionInfo[] = [];
   const rip = await ripOffsets(reader, signal).catch(error => { if ((error as Error).name === "AbortError") throw error; return undefined; });
-  // RIP offsets prioritize known partitions; a sequential scan remains authoritative for metadata between them.
-  if (rip) for (const offset of rip) try { const header = await readKlvHeader(reader, offset, signal); if (isPartition(header.key) && header.valueLength <= BigInt(max)) partitions.push(partition(offset, header.key, await readKlvValue(reader, header, max, signal))); } catch (error) { if ((error as Error).name === "AbortError") throw error; }
+  if (rip) {
+    try {
+      partitions = await parseFromRip(reader, rip, result, rates, max, signal);
+      return Object.assign(finalizeMxfMetadata(result, rates), { partitions, usedRandomIndexPack: true });
+    } catch (error) {
+      if ((error as Error).name === "AbortError") throw error;
+      // A structurally invalid RIP/partition map falls back to bounded-value sequential discovery.
+      result = createMxfMetadataResult(); rates = []; partitions = [];
+    }
+  }
   let offset = 0n;
   while (offset < reader.size) {
     let header; try { header = await readKlvHeader(reader, offset, signal); } catch (error) { if ((error as Error).name === "AbortError") throw error; break; }
@@ -46,5 +87,5 @@ export async function parseMxfMetadataFromReader(reader: RandomAccessReader, opt
     }
     offset = header.nextOffset;
   }
-  return Object.assign(finalizeMxfMetadata(result, rates), { partitions: partitions.sort((a, b) => a.offset < b.offset ? -1 : 1), usedRandomIndexPack: Boolean(rip) });
+  return Object.assign(finalizeMxfMetadata(result, rates), { partitions: partitions.sort((a, b) => a.offset < b.offset ? -1 : 1), usedRandomIndexPack: false });
 }

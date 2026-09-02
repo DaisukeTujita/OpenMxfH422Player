@@ -2,6 +2,7 @@ import { describe,expect,it } from "vitest";
 import { parseMxfMetadata } from "./mxf-metadata";
 import { parseMxfMetadataFromReader } from "./mxf-reader";
 import { FileRandomAccessReader } from "./random-access-reader";
+import type { RandomAccessReader } from "./random-access-reader";
 const key=(tail:number)=>new Uint8Array([0x06,0x0e,0x2b,0x34,0x02,0x53,0x01,0x01,0x0d,0x01,0x02,0x01,0x01,0x01,0x01,tail]);
 const field=(tag:number,value:number[])=>[tag>>8,tag&255,value.length,...value];
 const klv=(key:Uint8Array,value:number[])=>new Uint8Array([...key,value.length,...value]);
@@ -11,3 +12,34 @@ describe("MXF reader metadata",()=>{
   it("uses RIP partition offsets when a valid pack is present",async()=>{const partitionKey=new Uint8Array([0x06,0x0e,0x2b,0x34,0x02,0x05,1,1,0x0d,1,2,1,1,2,1,0]);const pack=klv(partitionKey,new Array(80).fill(0));const ripKey=new Uint8Array([0x06,0x0e,0x2b,0x34,0x02,0x05,1,1,0x0d,1,2,1,1,0x11,1,0]);const ripValue=[0,0,0,1,...new Array(8).fill(0),0,0,0,33];const rip=klv(ripKey,ripValue);const parsed=await parseMxfMetadataFromReader(reader(new Uint8Array([...pack,...rip])));expect(parsed.usedRandomIndexPack).toBe(true);expect(parsed.partitions).toMatchObject([{offset:0n,kind:"header",bodySid:0,indexSid:0}]);});
 });
 function reader(data:Uint8Array){return new FileRandomAccessReader(new Blob([data]),{chunkSize:8,maxReadSize:128});}
+
+const concat=(...parts:Uint8Array[])=>{const output=new Uint8Array(parts.reduce((n,p)=>n+p.length,0));let at=0;for(const part of parts){output.set(part,at);at+=part.length;}return output;};
+const be32=(value:number)=>new Uint8Array([value>>>24,value>>>16,value>>>8,value]);
+const be64=(value:bigint)=>{const bytes=new Uint8Array(8);new DataView(bytes.buffer).setBigUint64(0,value);return bytes;};
+const localField=(tag:number,value:Uint8Array)=>concat(new Uint8Array([tag>>>8,tag,value.length]),value);
+const makeKlv=(key:Uint8Array,value:Uint8Array)=>concat(key,new Uint8Array([value.length]),value);
+const partitionPack=(kind:number,headerCount:bigint,indexCount:bigint)=>{const value=new Uint8Array(80),view=new DataView(value.buffer);view.setBigUint64(32,headerCount);view.setBigUint64(40,indexCount);return makeKlv(new Uint8Array([6,14,43,52,2,5,1,1,13,1,2,1,1,kind,1,0]),value);};
+
+class SparseReader implements RandomAccessReader {
+  readonly requests:Array<{offset:bigint;length:number}>=[];bytesLoaded=0n;largestRead=0;
+  constructor(readonly size:bigint,private regions:Array<{offset:bigint;data:Uint8Array}>){ }
+  async read(offset:bigint,length:number):Promise<Uint8Array>{this.requests.push({offset,length});this.bytesLoaded+=BigInt(length);this.largestRead=Math.max(this.largestRead,length);const output=new Uint8Array(length);for(const region of this.regions){const start=offset>region.offset?offset:region.offset,end=offset+BigInt(length)<region.offset+BigInt(region.data.length)?offset+BigInt(length):region.offset+BigInt(region.data.length);if(start<end)output.set(region.data.subarray(Number(start-region.offset),Number(end-region.offset)),Number(start-offset));}return output;}
+}
+
+describe("RIP-directed sparse MXF parsing",()=>{
+  it("reads only partition metadata/index areas in a virtual long-form file",async()=>{
+    const size=100n*1024n*1024n*1024n,headerOffset=0n,bodyOffset=1024n*1024n*1024n,indexOffset=80n*1024n*1024n*1024n,footerOffset=size-1024n*1024n;
+    const metadata=makeKlv(key(1),localField(0x3203,be32(1920)));
+    const indexKey=new Uint8Array([6,14,43,52,2,83,1,1,13,1,2,1,1,16,1,0]);
+    const index=makeKlv(indexKey,concat(localField(0x3f0b,concat(be32(30000),be32(1001))),localField(0x3f0c,be64(0n)),localField(0x3f0d,be64(1n))));
+    const headerPack=partitionPack(2,BigInt(metadata.length),0n),bodyPack=partitionPack(3,0n,0n),indexPack=partitionPack(3,0n,BigInt(index.length)),footerPack=partitionPack(4,BigInt(metadata.length),0n);
+    const offsets=[headerOffset,bodyOffset,indexOffset,footerOffset],ripValue=concat(...offsets.map(offset=>concat(be32(1),be64(offset))),be32(16+1+offsets.length*12+4));
+    const rip=makeKlv(new Uint8Array([6,14,43,52,2,5,1,1,13,1,2,1,1,17,1,0]),ripValue),ripOffset=size-BigInt(rip.length);
+    const sparse=new SparseReader(size,[{offset:headerOffset,data:headerPack},{offset:BigInt(headerPack.length),data:metadata},{offset:bodyOffset,data:bodyPack},{offset:indexOffset,data:indexPack},{offset:indexOffset+BigInt(indexPack.length),data:index},{offset:footerOffset,data:footerPack},{offset:footerOffset+BigInt(footerPack.length),data:metadata},{offset:ripOffset,data:rip}]);
+    const parsed=await parseMxfMetadataFromReader(sparse);
+    expect(parsed.usedRandomIndexPack).toBe(true);expect(parsed.partitions.map(p=>p.kind)).toEqual(["header","body","body","footer"]);expect(parsed.mediaInfo.video?.width).toBe(1920);expect(parsed.indexTables).toHaveLength(1);
+    expect(sparse.bytesLoaded).toBeLessThan(2048n);expect(sparse.bytesLoaded*1_000_000n).toBeLessThan(size);expect(sparse.largestRead).toBeLessThanOrEqual(4*1024*1024);
+    expect(sparse.requests.every(request=>request.offset===size-4n||[ripOffset,...offsets].some(base=>request.offset>=base&&request.offset<base+512n))).toBe(true);
+    expect(sparse.requests.some(request=>request.offset>bodyOffset+BigInt(bodyPack.length)&&request.offset<indexOffset)).toBe(false);
+  });
+});
