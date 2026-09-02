@@ -117,6 +117,15 @@ describe("PlayerEngine decoder cleanup", () => {
   });
 });
 
+describe("selectTimecodeTrack unresolved package fallback", () => {
+  it("uses KLV order and excludes invalid rates while package parsing is unsupported",()=>{
+    const invalid={startFrame:0,roundedTimecodeBase:25,dropFrame:false,editRateNumerator:0,editRateDenominator:1,packageKind:"material" as const,packageReferenceResolved:true};
+    const source={...invalid,startFrame:10,editRateNumerator:25,packageKind:"source" as const};
+    const material={...source,startFrame:20,packageKind:"material" as const};
+    expect(selectTimecodeTrack([invalid,source,material])).toBe(source);
+  });
+});
+
 describe("selectTimecodeTrack", () => {
   const first = { startFrame: 100, roundedTimecodeBase: 30, dropFrame: false, editRateNumerator: 30000, editRateDenominator: 1001 };
   const second = { startFrame: 200, roundedTimecodeBase: 30, dropFrame: true, editRateNumerator: 30000, editRateDenominator: 1001 };
@@ -206,8 +215,45 @@ describe("PlayerEngine streaming mode",()=>{
 
   it("aborts a normal fill when seeking and only resumes from the seek target",async()=>{
     vi.stubGlobal("requestAnimationFrame",vi.fn(()=>1));vi.stubGlobal("cancelAnimationFrame",vi.fn());vi.spyOn(performance,"now").mockReturnValue(1000);
-    const h=streamingPlaybackHarness(),old=new AbortController();h.engine.fillController=old;h.engine.filling=new Promise(()=>{});h.engine.fillStreaming=vi.fn(async(start:number)=>{h.engine.frames=[{frame:{width:2,height:2},time:start/10}];h.engine.queuedThroughFrame=start+29;return true;});
+    const h=streamingPlaybackHarness(),old=new AbortController();h.engine.fillController=old;h.engine.filling=new Promise(()=>{});h.engine.fillStreaming=vi.fn(async(start:number)=>{h.engine.frames=[{frame:{width:2,height:2},time:start/10,mediaFrame:start}];h.engine.queuedThroughFrame=start+29;return true;});
     await h.engine.seek(100);expect(old.signal.aborted).toBe(true);expect(h.engine.fillStreaming.mock.calls[0][0]).toBe(1000);expect(h.engine.renderer.draw).toHaveBeenCalledWith(expect.objectContaining({width:2}),2,2);expect(h.engine.frames.every((frame:any)=>frame.time>=100)).toBe(true);expect(h.engine.status).toBe("playing");expect(h.callbacks.seeking).toHaveBeenLastCalledWith(false);
+  });
+
+  it("decodes from RAP, retains only target-and-later frames, and derives the displayed frame",async()=>{
+    vi.stubGlobal("cancelAnimationFrame",vi.fn());
+    const h=streamingPlaybackHarness();h.engine.status="paused";h.engine.durationValue=10;h.engine.essenceIndex={frameRate:30,packets:[]};
+    h.engine.indexTables=[{editRateNumerator:30,editRateDenominator:1,startPosition:0,duration:300,entries:[{editUnit:90,streamOffset:0n,isRandomAccessPoint:true}]}];
+    h.engine.timecodeInfo={startFrame:0,roundedTimecodeBase:30,dropFrame:false,editRateNumerator:30,editRateDenominator:1};h.engine.reader={destroy:vi.fn(),getStats:()=>({bytesLoaded:123n})};
+    const packets=Array.from({length:41},(_,i)=>({kind:"video",editUnit:90+i,data:new Uint8Array([i]),valueOffset:0n,valueLength:1n,offset:0n,trackNumber:1,presentationTime:(90+i)/30}));
+    h.engine.dependencies={readRange:vi.fn(async(_reader:any,_index:any,options:any)=>{expect(options).toMatchObject({startFrame:90,prerollFrames:0});expect(options.endFrame).toBeGreaterThanOrEqual(100);return packets.filter(packet=>packet.editUnit<=options.endFrame);})};
+    const decodedInputs:number[][]=[];h.engine.decodeVideo=vi.fn(async(_chunks:any,_codec:any,_av:any,mediaFrames:number[])=>{decodedInputs.push(mediaFrames);return mediaFrames.map(mediaFrame=>({frame:{width:2,height:2},time:mediaFrame/30,mediaFrame}));});
+    h.engine.fillStreamingAudio=vi.fn(async(mediaTime:number)=>{expect(mediaTime).toBe(100/30);return true;});
+    await h.engine.seekTimecode("00:00:03:10");
+    expect(decodedInputs[0][0]).toBe(90);expect(decodedInputs[0]).toContain(100);expect(h.engine.frames[0].mediaFrame).toBe(100);expect(h.engine.frames.some((frame:any)=>frame.mediaFrame<100)).toBe(false);
+    expect(h.engine.renderer.draw).toHaveBeenCalledWith(packets[10]&&expect.objectContaining({width:2}),2,2);expect(h.engine.actualDisplayedFrame).toBe(100);expect(h.engine.seekStartFrame).toBe(90);expect(h.engine.prerollFrames).toBe(10);expect(h.engine.seekSource).toBe("index");
+  });
+
+  it("fails strict timecode seek when the requested decoded frame is absent",async()=>{
+    vi.stubGlobal("cancelAnimationFrame",vi.fn());const h=streamingPlaybackHarness();h.engine.status="paused";h.engine.durationValue=10;h.engine.essenceIndex={frameRate:30,packets:[]};h.engine.indexTables=[];h.engine.reader={destroy:vi.fn()};h.engine.timecodeInfo={startFrame:0,roundedTimecodeBase:30,dropFrame:false,editRateNumerator:30,editRateDenominator:1};
+    h.engine.fillStreaming=vi.fn(async()=>{h.engine.frames=[{frame:{width:2,height:2},time:99/30,mediaFrame:99}];return true;});h.engine.fillStreamingAudio=vi.fn(async()=>true);
+    await expect(h.engine.seekTimecode("00:00:03:10")).rejects.toThrow("Requested frame 100 was not decoded");expect(h.engine.requestedTimecode).not.toBe("00:00:03:10");expect(h.callbacks.error).toHaveBeenCalled();
+  });
+
+  it("does not apply an older timecode result after a newer seek generation",async()=>{
+    const h=streamingPlaybackHarness(),first=gate();h.engine.publishDiagnostics=vi.fn();h.engine.durationValue=20;h.engine.essenceIndex={frameRate:30,packets:[]};h.engine.timecodeInfo={startFrame:0,roundedTimecodeBase:30,dropFrame:false,editRateNumerator:30,editRateDenominator:1};
+    h.engine.seek=vi.fn(async(seconds:number)=>{const generation=++h.engine.seekGeneration;if(seconds===1){first.open();await first.wait;}if(generation!==h.engine.seekGeneration)return;});
+    const old=h.engine.seekTimecode("00:00:01:00");await first.entered;await h.engine.seekTimecode("00:00:02:00");first.release();await old;
+    expect(h.engine.requestedTimecode).toBe("00:00:02:00");expect(h.engine.requestedFrame).toBe(60);
+  });
+
+  it("rejects timecode outside engine duration when track duration is absent",async()=>{
+    const h=streamingPlaybackHarness();h.engine.durationValue=2;h.engine.essenceIndex={frameRate:30,packets:[]};h.engine.timecodeInfo={startFrame:0,roundedTimecodeBase:30,dropFrame:false,editRateNumerator:30,editRateDenominator:1};
+    await expect(h.engine.seekTimecode("00:00:02:00")).rejects.toThrow("out-of-range");expect(h.callbacks.seeking).not.toHaveBeenCalled();
+  });
+
+  it("uses sequential fallback decode start when no Index Table exists",async()=>{
+    vi.stubGlobal("cancelAnimationFrame",vi.fn());const h=streamingPlaybackHarness();h.engine.status="paused";h.engine.indexTables=[];h.engine.fillStreaming=vi.fn(async(target:number,_signal:any,_load:any,_seek:any,start:number)=>{expect(target).toBe(100);expect(start).toBe(0);h.engine.frames=[{frame:{width:2,height:2},time:10,mediaFrame:100}];return true;});h.engine.fillStreamingAudio=vi.fn(async()=>true);
+    await h.engine.seek(10);expect(h.engine.seekSource).toBe("sequential-fallback");expect(h.engine.actualDisplayedFrame).toBe(100);
   });
 
   it("does not auto-resume after pause while buffering",()=>{
@@ -237,7 +283,7 @@ describe("PlayerEngine streaming mode",()=>{
 
   it("treats an aborted stale seek as a successful cancellation",async()=>{
     vi.stubGlobal("requestAnimationFrame",vi.fn(()=>1));vi.stubGlobal("cancelAnimationFrame",vi.fn());const h=streamingPlaybackHarness(),firstEntered=gate();h.engine.status="paused";
-    h.engine.fillStreaming=vi.fn(async(start:number,signal:AbortSignal)=>{if(start===100){firstEntered.open();await firstEntered.wait;if(signal.aborted)throw new DOMException("aborted","AbortError");}h.engine.frames=[{frame:{width:2,height:2},time:start/10}];return true;});
+    h.engine.fillStreaming=vi.fn(async(start:number,signal:AbortSignal)=>{if(start===100){firstEntered.open();await firstEntered.wait;if(signal.aborted)throw new DOMException("aborted","AbortError");}h.engine.frames=[{frame:{width:2,height:2},time:start/10,mediaFrame:start}];return true;});
     const first=h.engine.seek(10);await firstEntered.entered;const second=h.engine.seek(100);firstEntered.release();await expect(first).resolves.toBeUndefined();await expect(second).resolves.toBeUndefined();
     expect(h.callbacks.error).not.toHaveBeenCalled();expect(h.callbacks.status).not.toHaveBeenCalledWith("error");expect(h.engine.renderer.draw).toHaveBeenLastCalledWith(expect.objectContaining({width:2}),2,2);expect(h.engine.frames[0].time).toBe(100);
   });

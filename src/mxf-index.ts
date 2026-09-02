@@ -29,12 +29,18 @@ export interface SeekPoint {
 export function findSeekPoint(index: MxfIndexTable | undefined, targetEditUnit: number): SeekPoint {
   const target = Math.max(0, Math.trunc(targetEditUnit));
   if (!index) return { editUnit: 0, source: "sequential-fallback" };
-  const candidates = index.entries.filter(entry => entry.editUnit <= target && entry.isRandomAccessPoint !== false);
-  const selected = candidates.at(-1);
-  if (selected) return { editUnit: selected.editUnit, streamOffset: selected.streamOffset, source: "index" };
-  if (index.editUnitByteCount !== undefined) {
-    const editUnit = Math.max(index.startPosition, Math.min(target, index.startPosition + index.duration - 1));
-    return { editUnit, streamOffset: BigInt(editUnit - index.startPosition) * BigInt(index.editUnitByteCount), source: "index" };
+  const entries = index.entries.filter(entry => entry.editUnit <= target);
+  for (let at=entries.length-1;at>=0;at--) {
+    const entry=entries[at];
+    if (entry.keyFrameOffset !== undefined) {
+      const editUnit=Math.max(0,entry.editUnit+entry.keyFrameOffset);
+      if(editUnit>target)continue;
+      const referenced=index.entries.find(candidate=>candidate.editUnit===editUnit);
+      return {editUnit,streamOffset:referenced?.streamOffset,source:"index"};
+    }
+    if (entry.isRandomAccessPoint===true || entry.flags!==undefined && (entry.flags&0x80)!==0)
+      return {editUnit:entry.editUnit,streamOffset:entry.streamOffset,source:"index"};
   }
+  // A constant byte size locates an edit unit but does not prove it is independently decodable.
   return { editUnit: 0, source: "sequential-fallback" };
 }

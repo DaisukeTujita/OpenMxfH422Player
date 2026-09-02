@@ -98,27 +98,27 @@ Stream OffsetはJavaScriptの安全な整数範囲に丸めず `bigint` で保�
 
 ## タイムコード表示
 
-### 次期タイムコードジャンプUI
+### タイムコードジャンプUI
 
-現在タイムコードの見やすい表示と、Non-Drop Frameの`HH:MM:SS:FF`、Drop Frameの`HH:MM:SS;FF`入力を追加する予定です。TimecodeTrack.startFrameとの差からmedia frameを計算して入力タイムコードへseekし、素材範囲外と不正Drop Frame番号を検証します。legacy/streaming共通の既存seek APIを利用し、連続seekのAbort・世代管理を維持します。
+現在タイムコードの見やすい表示と、Non-Drop Frameの`HH:MM:SS:FF`、Drop Frameの`HH:MM:SS;FF`入力に対応します。TimecodeTrack.startFrameとの差からmedia frameを計算し、素材範囲外と不正Drop Frame番号を検証して、legacy/streaming共通の世代管理付きseekを実行します。
 
 サンプル画面はミリ秒単位の再生位置とMXFタイムコードを併記します。Non-Drop Frameに加え、29.97 fps（base 30）と59.94 fps（base 60）のDrop Frame番号を扱い、区切りはDrop Frameでは `;`、Non-Dropでは `:` です。開始タイムコードへ現在の再生フレームを加算し、24時間でラップします。利用可能なTimecode Trackがない場合は「タイムコードなし」と表示し、再生自体は継続します。
 
 ### 複数Timecode Trackの選択規則
 
-現段階ではMaterial PackageとSource Packageの参照関係を完全には解決していません。複数のTimecode Trackが見つかった場合は、**MXF内のKLV検出順で最初に現れ、Edit Rateの分子・分母がともに正数であるTrack**を表示に使用します。検出数を`console.debug`へ、複数検出の警告を`console.warn`へ、選択したTrackのStart Timecode（frame値）・Edit Rate・Drop Frameを`console.info`へ出力します。この規則は暫定的なもので、Package参照を解決できるようになった段階でMaterial Package優先へ置き換える予定です。
+Preface、ContentStorage、MaterialPackage、SourcePackage、Track、Sequence、SourceClip間の参照解析は未対応です。複数のTimecode Trackでは、**常にMXF内のKLV検出順で最初に現れ、Edit Rateの分子・分母がともに正数であるTrack**を使用します。診断にも「Package参照解析は未対応のためKLV検出順で選択」と明示し、Material Packageであるという未検証の推測は行いません。
 
 サンプルの「MXF解析情報」にはOperational Pattern、Essence Container、解像度、Edit Rate、Aspect Ratio、音声Sample Rate、チャンネル数、Quantization Bits、Timecode Track数、選択された開始タイムコード、Drop Frame、Index Table数とEntry総数を表示します。メタデータから取得できなかった項目を再生用固定値で補完せず、「未取得」と表示します。
 
 ## Indexとシーク
 
-`findSeekPoint()` は目的Edit Unit以前のRandom Access Pointを選択します。Index Entryがなく固定Edit Unit Byte Countがある場合はオフセットを算出し、Index Tableがない・壊れている場合は `source: "sequential-fallback"` として先頭からの順次走査を明示します。streamingシークはIndex EntryのKeyFrameOffset/RAPからprerollを選び、対象区間だけを読み直します。絶対位置が検証できないStreamOffsetは利用せず、KLV索引のvalue offsetを使用します。
+`findSeekPoint()` は目的Edit Unit以前のRandom Access Pointを選択します。Index Entryがない場合は、固定Edit Unit Byte Countだけでは独立デコード可能と判断せず、`source: "sequential-fallback"`として先頭からの順次走査を明示します。streamingシークはIndex EntryのKeyFrameOffset/RAPからprerollを選び、対象区間だけを読み直します。絶対位置が検証できないStreamOffsetは利用せず、KLV索引のvalue offsetを使用します。
 
 ## 読み込み・メモリ設計と段階的移行
 
 索引と`readEssenceRange()`はファイルサイズではなくKLV packet数と対象区間に比例します。最大単一readは4 MiB、キャッシュは64 MiB、Indexがない場合のprerollは45フレームです。PlayerEngineにはloadGeneration/AbortSignalに加えてseek専用AbortControllerと世代番号があり、古いseekの完了通知を抑止します。ただし現在の再生デコード互換経路は依然「ファイル全体を `ArrayBuffer` 化 → 全映像・音声デコード」で、長尺素材のピークメモリはまだ解消していません。
 
-Index Tableがない場合はBody Partition/KLVの既知位置、または先頭から順次走査する安全なフォールバックを使用する予定です。未対応形式はDescriptor情報を含む理解可能なエラーにする予定ですが、現エンジンが受理する範囲は下記の既存形式に限られます。
+Index Tableがない場合はBody Partition/KLVの既知位置、または先頭から順次走査する安全なフォールバックを使用します。未対応形式はDescriptor情報を含む理解可能なエラーにする予定ですが、現エンジンが受理する範囲は下記の既存形式に限られます。
 
 ## 対応素材
 
@@ -133,3 +133,11 @@ Index Tableがない場合はBody Partition/KLVの既知位置、または先頭
 libav.jsおよび組み込まれるFFmpeg部分は **GNU LGPL 2.1** です。生成JavaScript内のライセンス表示を削除せず、配布物にはライセンス本文と使用の告知を添付してください。WASM/object codeを配布する場合は、LGPL 2.1が要求する完全な対応ソース（使用したlibav.js/FFmpegソース、変更、ビルドスクリプト・構成）を同じ場所から提供するか、同等の適法な提供方法を用意してください。本リポジトリでは固定tag、`libav/config.json`、build scriptを公開し、受領者が差し替え版を再buildできるようにしています。配布者は自身の配布方法についてライセンス条件を確認してください。
 
 対応ソース: [Yahweasel/libav.js v6.10.9.0](https://github.com/Yahweasel/libav.js/tree/v6.10.9.0) / [LGPL 2.1](https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html)
+
+## タイムコード指定ジャンプ
+
+Timecode ComponentからStart Timecode、Rounded Timecode Base、Drop Frame、Duration、Edit Rateを取得し、取得値には`source: "mxf"`を付けます。`mediaFrameToTimecode` / `mediaSecondsToTimecode`と`timecodeToMediaFrame` / `timecodeToMediaSeconds`は整数フレームを基準に、24時間ラップ、29.97/59.94 Drop Frame、素材範囲を検証します。`ref.seekTimecode("10:01:00;02")`は正確なmedia frameへ変換して既存の世代管理付きseekを利用し、`seek(seconds)`との互換性を維持します。Timecode Trackがない場合も再生と秒指定seekは継続します。
+
+Package参照解析は未対応であり、複数Trackでは常にKLV検出順フォールバックを使用して、その理由を`timecodeSelectionReason`へ表示します。Material Package優先は実装していません。
+
+streaming seekの診断には要求/表示frame、RAP開始frame、preroll、Indexまたはsequential fallback、読み込みbytes、経過時間を含めます。Index EntryのRAP/KeyFrameOffset/Flagsはessence range選択に使用します。TemporalOffsetが示す複雑な表示順の完全な追跡、および絶対StreamOffsetをPartitionへ関連付けられないファイルでは、安全なKLV索引位置を利用する制限があります。

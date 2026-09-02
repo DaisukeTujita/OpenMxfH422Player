@@ -6,12 +6,12 @@ export { FileRandomAccessReader, DEFAULT_READER_CACHE_BYTES, DEFAULT_READER_CHUN
 export { readKlvHeader, readKlvValue } from "./klv-reader";
 export { findSeekPoint } from "./mxf-index";
 export { indexMxfEssence, readEssenceRange, essenceDecodeStart, DEFAULT_ESSENCE_PREROLL_FRAMES, DEFAULT_ESSENCE_READ_SIZE } from "./essence-reader";
-export { formatTimecodeFrame, timecodeAtFrame, timecodeAtSeconds } from "./timecode";
+export { formatTimecodeFrame, parseTimecodeFrame, framesPerTimecodeDay, mediaFrameToTimecode, mediaSecondsToTimecode, timecodeToMediaFrame, timecodeToMediaSeconds, resolveTimecodePosition, timecodeAtFrame, timecodeAtSeconds } from "./timecode";
 export type { MxfMediaInfo, MxfMetadataResult } from "./mxf-metadata";
 export type { MxfPartitionInfo, MxfReaderResult } from "./mxf-reader";
 export type { RandomAccessReader, ReaderStats, FileRandomAccessReaderOptions } from "./random-access-reader";
 export type { KlvHeader } from "./klv-reader";
 export type { MxfIndexEntry, MxfIndexTable, SeekPoint } from "./mxf-index";
 export type { EssenceIndex, EssenceIndexEntry, EssenceRangeOptions, ReadEssencePacket } from "./essence-reader";
-export type { MxfTimecodeInfo } from "./timecode";
+export type { MxfTimecodeInfo, TimecodeConversionError, TimecodePosition } from "./timecode";
 export type { H422PlayerHandle, H422PlayerProps, PlaybackMode, PlayerDiagnostics, PlayerInfo, PlayerStatus } from "./types";
