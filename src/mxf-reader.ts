@@ -16,7 +16,7 @@ const RUN_IN_SCAN_CHUNK_BYTES = 4096;
 async function firstMxfOffset(reader: RandomAccessReader, signal?: AbortSignal): Promise<bigint | undefined> {
   if (reader.size < 16n) return;
   const firstKey = await reader.read(0n, 16, signal);
-  if (firstKey[0] === 0x06 && firstKey[1] === 0x0e && firstKey[2] === 0x2b && firstKey[3] === 0x34) {
+  if (isPartition(firstKey)) {
     try { await readKlvHeader(reader, 0n, signal); return 0n; }
     catch (error) { if ((error as Error).name === "AbortError") throw error; }
   }
