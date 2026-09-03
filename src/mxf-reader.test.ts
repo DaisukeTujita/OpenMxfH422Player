@@ -45,14 +45,20 @@ describe("RIP-directed sparse MXF parsing",()=>{
   });
 
   it("parses a bounded descriptor KLV that starts inside and crosses the declared header range",async()=>{
-    const metadata=makeKlv(key(1),localField(0x3203,be32(1920)));
-    const headerPack=partitionPack(2,5n,0n);
+    const essenceContainer=new Uint8Array([6,14,43,52,4,1,1,1,13,1,3,1,2,4,96,1]);
+    const metadata=makeKlv(key(1),concat(localField(0x3203,be32(1920)),localField(0x3202,be32(1080)),localField(0x3004,essenceContainer)));
+    const headerPack=op1aPartitionPack(5n);
     const ripValue=concat(be32(1),be64(0n),be32(33));
     const rip=makeKlv(new Uint8Array([6,14,43,52,2,5,1,1,13,1,2,1,1,17,1,0]),ripValue);
     const parsed=await parseMxfMetadataFromReader(reader(concat(headerPack,metadata,rip)));
     expect(parsed.usedRandomIndexPack).toBe(true);
     expect(parsed.partitions).toHaveLength(1);
-    expect(parsed.mediaInfo.video?.width).toBe(1920);
+    expect(parsed.mediaInfo).toMatchObject({
+      operationalPattern:"OP1a",
+      essenceContainer:"060e2b34040101010d01030102046001",
+      video:{width:1920,height:1080},
+    });
+    expect(Boolean(parsed.mediaInfo.video?.width&&parsed.mediaInfo.video.height&&parsed.mediaInfo.essenceContainer)).toBe(true);
   });
 });
 
