@@ -89,8 +89,10 @@ async function parseRange(reader: RandomAccessReader, start: bigint, end: bigint
 async function parseFromRip(reader: RandomAccessReader, offsets: bigint[], result: MxfMetadataResult, rates: Array<readonly [number, number]>, max: number, signal?: AbortSignal): Promise<MxfPartitionInfo[]> {
   const partitions: MxfPartitionInfo[] = [];
   for (const offset of offsets) {
+    console.info("[H422Player] MXF RIP partition:read", {offset:String(offset)});
     const header = await readKlvHeader(reader, offset, signal);
-    if (!isPartition(header.key) || header.valueLength > BigInt(max)) throw new Error("RIP points to an invalid Partition Pack");
+    console.info("[H422Player] MXF RIP partition:header", {offset:String(offset),key:hex(header.key),valueLength:String(header.valueLength),isPartition:isPartition(header.key)});
+    if (!isPartition(header.key) || header.valueLength > BigInt(max)) throw new Error(`RIP points to an invalid Partition Pack at ${offset} (key=${hex(header.key)}, valueLength=${header.valueLength})`);
     const value = await readKlvValue(reader, header, max, signal), info = partition(offset, header.key, value);
     partitions.push(info); parseMxfMetadataKlv(result, header.key, value, rates);
     const headerEnd = checkedEnd(header.nextOffset, info.headerByteCount ?? 0n, reader.size, "Header Metadata");
@@ -115,6 +117,7 @@ export async function parseMxfMetadataFromReader(reader: RandomAccessReader, opt
       return Object.assign(finalizeMxfMetadata(result, rates), { partitions, usedRandomIndexPack: true });
     } catch (error) {
       if ((error as Error).name === "AbortError") throw error;
+      console.warn("[H422Player] MXF RIP parse failed; falling back to prologue discovery", {offsets:rip.map(String),reason:error instanceof Error?error.message:String(error),error});
       // A structurally invalid RIP/partition map falls back to bounded-value sequential discovery.
       result = createMxfMetadataResult(); rates = []; partitions = [];
     }
