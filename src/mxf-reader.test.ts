@@ -4,7 +4,7 @@ import { parseMxfMetadataFromReader } from "./mxf-reader";
 import { FileRandomAccessReader } from "./random-access-reader";
 import type { RandomAccessReader } from "./random-access-reader";
 const key=(tail:number)=>new Uint8Array([0x06,0x0e,0x2b,0x34,0x02,0x53,0x01,0x01,0x0d,0x01,0x02,0x01,0x01,0x01,0x01,tail]);
-const field=(tag:number,value:number[])=>[tag>>8,tag&255,value.length,...value];
+const field=(tag:number,value:number[])=>[tag>>8,tag&255,value.length>>8,value.length&255,...value];
 const klv=(key:Uint8Array,value:number[])=>new Uint8Array([...key,value.length,...value]);
 describe("MXF reader metadata",()=>{
   it("matches the synchronous parser and skips a large essence value",async()=>{const metadata=klv(key(1),field(0x3203,[0,0,7,128]));const essenceKey=new Uint8Array([0x06,0x0e,0x2b,0x34,1,2,1,1,0x0d,1,3,1,0x15,1,1,1]);const essence=klv(essenceKey,new Array(100).fill(7));const data=new Uint8Array([...metadata,...essence]);const reader=new FileRandomAccessReader(new Blob([data]),{chunkSize:16,maxReadSize:256});const parsed=await parseMxfMetadataFromReader(reader);expect(parsed.mediaInfo).toEqual(parseMxfMetadata(data).mediaInfo);expect(reader.getStats().bytesLoaded).toBeLessThan(BigInt(data.length));expect(parsed.usedRandomIndexPack).toBe(false);});
