@@ -13,10 +13,11 @@ const isMetadata = (key: Uint8Array) => { const value = hex(key); return isParti
 const MAX_RUN_IN_BYTES = 65535;
 const RUN_IN_SCAN_CHUNK_BYTES = 4096;
 
-async function firstMxfOffset(reader: RandomAccessReader, signal?: AbortSignal): Promise<bigint | undefined> {
+async function firstMxfOffset(reader: RandomAccessReader, signal?: AbortSignal, requirePartition = false): Promise<bigint | undefined> {
   if (reader.size < 16n) return;
   const firstKey = await reader.read(0n, 16, signal);
-  if (isPartition(firstKey)) {
+  const startsWithUl = firstKey[0] === 0x06 && firstKey[1] === 0x0e && firstKey[2] === 0x2b && firstKey[3] === 0x34;
+  if (!requirePartition && startsWithUl) {
     try { await readKlvHeader(reader, 0n, signal); return 0n; }
     catch (error) { if ((error as Error).name === "AbortError") throw error; }
   }
@@ -112,15 +113,32 @@ export async function parseMxfMetadataFromReader(reader: RandomAccessReader, opt
   // SMPTE MXF permits up to 65,535 bytes of run-in before the Header Partition.
   // A full-file parser can search past it, but a random-access parser must locate
   // the first valid Partition Pack before walking KLV boundaries.
-  let offset = await firstMxfOffset(reader, signal) ?? 0n;
-  while (offset < reader.size) {
-    let header; try { header = await readKlvHeader(reader, offset, signal); } catch (error) { if ((error as Error).name === "AbortError") throw error; break; }
-    if (isMetadata(header.key) && header.valueLength <= BigInt(max)) {
-      const value = await readKlvValue(reader, header, max, signal);
-      parseMxfMetadataKlv(result, header.key, value, rates);
-      if (isPartition(header.key) && !partitions.some(item => item.offset === offset)) partitions.push(partition(offset, header.key, value));
+  const initialOffset = await firstMxfOffset(reader, signal) ?? 0n;
+  const parseSequentially = async (start: bigint): Promise<boolean> => {
+    let offset = start;
+    while (offset < reader.size) {
+      let header;
+      try { header = await readKlvHeader(reader, offset, signal); }
+      catch (error) {
+        if ((error as Error).name === "AbortError") throw error;
+        return false;
+      }
+      if (isMetadata(header.key) && header.valueLength <= BigInt(max)) {
+        const value = await readKlvValue(reader, header, max, signal);
+        parseMxfMetadataKlv(result, header.key, value, rates);
+        if (isPartition(header.key) && !partitions.some(item => item.offset === offset)) partitions.push(partition(offset, header.key, value));
+      }
+      offset = header.nextOffset;
     }
-    offset = header.nextOffset;
+    return true;
+  };
+  const reachedEnd = await parseSequentially(initialOffset);
+  if (!reachedEnd && initialOffset === 0n && partitions.length === 0) {
+    const runInOffset = await firstMxfOffset(reader, signal, true);
+    if (runInOffset !== undefined) {
+      result = createMxfMetadataResult(); rates = []; partitions = [];
+      await parseSequentially(runInOffset);
+    }
   }
   return Object.assign(finalizeMxfMetadata(result, rates), { partitions: partitions.sort((a, b) => a.offset < b.offset ? -1 : 1), usedRandomIndexPack: false });
 }
