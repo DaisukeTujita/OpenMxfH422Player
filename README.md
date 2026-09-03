@@ -37,7 +37,9 @@ npm install
 npm run dev
 ```
 
-Node.js 20以上を使用してください。初回の`npm run dev`は、バージョンを固定したカスタムlibav.jsをGitHub Releaseから自動取得し、SHA-256を検証して`libav/dist`へ配置します。**Bash、Make、WSL、Emscriptenは不要**です。取得だけを先に行う場合は`npm run setup:libav`を実行できます。
+Node.js 20以上を使用してください。`npm run dev`は、再生モード選択、タイムコード表示、タイムコード指定ジャンプを備えた`examples/basic-player`を起動します。従来の簡易デモは`npm run dev:simple`で起動できます。
+
+初回起動時は、バージョンを固定したカスタムlibav.jsをGitHub Releaseから自動取得し、SHA-256を検証して`libav/dist`へ配置します。**Bash、Make、WSL、Emscriptenは不要**です。取得だけを先に行う場合は`npm run setup:libav`を実行できます。
 
 ## カスタムWASMの構成と配布
 
