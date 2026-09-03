@@ -8,10 +8,13 @@ h1 { margin: 6px 0 10px; font-size: clamp(2rem, 6vw, 4rem); letter-spacing: -0.0
 .eyebrow { color: #65d6ad; font-size: .8rem; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; }
 .description, .filename { color: #9aa7b8; }
 .panel { padding: 20px; border: 1px solid #283142; border-radius: 14px; background: #121722; }
-.file-panel { display: flex; align-items: center; gap: 18px; margin-bottom: 18px; }
+.file-panel { display: grid; grid-template-columns: 12rem 7rem minmax(0, 1fr) 7rem; align-items: center; gap: 12px; margin-bottom: 18px; min-height: 74px; }
+.mode-control { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 8px; white-space: nowrap; }
+.mode-control select { min-width: 0; padding: 8px; color: inherit; border: 1px solid #3b475a; border-radius: 8px; background: #0b0e14; }
+.mode-note { min-width: 0; color: #9aa7b8; font-size: .85rem; text-align: right; white-space: nowrap; }
 .file-picker { display: inline-flex; cursor: pointer; padding: 10px 16px; border-radius: 8px; color: #07110e; background: #65d6ad; font-weight: 700; }
 .file-picker input { position: absolute; width: 1px; height: 1px; opacity: 0; }
-.filename { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.filename { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .viewer { display: grid; min-height: 420px; place-items: center; overflow: hidden; border: 1px solid #283142; border-radius: 14px 14px 0 0; background: #020304; }
 .viewer > div, .viewer canvas { width: 100%; }
 .empty-state { color: #6f7b8c; text-align: center; }
@@ -35,4 +38,4 @@ button:disabled { cursor: not-allowed; opacity: .4; }
 .status { color: #65d6ad; }
 .status-error, .error-panel p:not(:empty) { color: #ff8f8f; }
 .error-panel { grid-column: 1 / -1; }
-@media (max-width: 620px) { main { padding-top: 28px; } .file-panel { align-items: flex-start; flex-direction: column; } .viewer { min-height: 240px; } .status-grid { grid-template-columns: 1fr; } .error-panel { grid-column: auto; } }
+@media (max-width: 720px) { main { padding-top: 28px; } .file-panel { grid-template-columns: minmax(0, 1fr) 7rem; } .filename { grid-column: 1 / -1; } .mode-note { grid-column: 1 / -1; min-height: 1.25rem; text-align: left; } .viewer { min-height: 240px; } .status-grid { grid-template-columns: 1fr; } .error-panel { grid-column: auto; } }
