@@ -49,13 +49,14 @@ describe("MXF run-in discovery",()=>{
   it("finds an OP1a Header Partition after run-in and parses metadata without a Timecode Track",async()=>{
     const metadata=makeKlv(key(1),localField(0x3203,be32(1920)));
     const runIn=new Uint8Array(4096).fill(0x55),pack=op1aPartitionPack(BigInt(metadata.length));
-    const parsed=await parseMxfMetadataFromReader(runInReader(concat(runIn,pack,metadata)));
+    const source=runInReader(concat(runIn,pack,metadata)),parsed=await parseMxfMetadataFromReader(source);
 
     expect(parsed.partitions).toMatchObject([{offset:4096n,kind:"header"}]);
     expect(parsed.mediaInfo.operationalPattern).toBe("OP1a");
     expect(parsed.mediaInfo.video?.width).toBe(1920);
     expect(parsed.timecodes).toEqual([]);
     expect(parsed.usedRandomIndexPack).toBe(false);
+    expect(source.getStats().largestUnderlyingRead).toBeLessThanOrEqual(4096);
   });
 
   it("does not scan beyond the maximum permitted run-in",async()=>{
