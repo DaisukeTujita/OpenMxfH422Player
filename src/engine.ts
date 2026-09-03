@@ -114,7 +114,7 @@ export class PlayerEngine {
     let localReader:(RandomAccessReader & {destroy():void})|undefined;try {
       const blob=typeof source === "string" ? await fetch(source,{signal}).then(r=>{if(!r.ok)throw new Error(`MXF request failed (${r.status})`);return r.blob();}) : source; this.fileSize=blob.size;
       if(!current())return;
-      const reader=this.dependencies.createReader(blob);localReader=reader;
+      const reader=this.dependencies.createReader(blob);localReader=reader;if(this.mode==="streaming")this.reader=reader;
       let metadata;
       try { metadata=await this.dependencies.parseMetadata(reader,signal); }
       finally { if(this.mode!=="streaming"||!current())this.destroyReader(reader); }
@@ -155,7 +155,7 @@ export class PlayerEngine {
       this.callbacks.mediaInfo?.(metadata.mediaInfo);this.callbacks.timecode?.(timecodeInfo ? timecodeAtSeconds(timecodeInfo,0) : null);
       this.callbacks.ready({width:first.frame.width,height:first.frame.height,frameRate:XDCAM_FRAME_RATE,duration,audioSampleRate:48000,audioChannels:audio.length?2:0});
       this.setStatus("ready");
-    } catch (e) { const error=e instanceof Error?e:new Error(String(e)); if(localReader)this.releaseReader(localReader); if(error.name==="AbortError"||!current())return; this.setStatus("error"); this.callbacks.error(error); throw error; }
+    } catch (e) { const error=e instanceof Error?e:new Error(String(e)); if(error.name!=="AbortError"&&current())this.publishDiagnostics(); if(localReader)this.releaseReader(localReader); if(error.name==="AbortError"||!current())return; this.setStatus("error"); this.callbacks.error(error); throw error; }
   }
   private async fillStreaming(targetFrame:number,signal:AbortSignal,loadGeneration:number,seekGeneration=this.seekGeneration,decodeStartFrame?:number):Promise<boolean>{
     if(!this.reader||!this.essenceIndex||!this.libav)return false;
