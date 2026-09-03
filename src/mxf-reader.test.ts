@@ -16,7 +16,7 @@ function reader(data:Uint8Array){return new FileRandomAccessReader(new Blob([dat
 const concat=(...parts:Uint8Array[])=>{const output=new Uint8Array(parts.reduce((n,p)=>n+p.length,0));let at=0;for(const part of parts){output.set(part,at);at+=part.length;}return output;};
 const be32=(value:number)=>new Uint8Array([value>>>24,value>>>16,value>>>8,value]);
 const be64=(value:bigint)=>{const bytes=new Uint8Array(8);new DataView(bytes.buffer).setBigUint64(0,value);return bytes;};
-const localField=(tag:number,value:Uint8Array)=>concat(new Uint8Array([tag>>>8,tag,value.length]),value);
+const localField=(tag:number,value:Uint8Array)=>concat(new Uint8Array([tag>>>8,tag,value.length>>>8,value.length]),value);
 const makeKlv=(key:Uint8Array,value:Uint8Array)=>concat(key,new Uint8Array([value.length]),value);
 const partitionPack=(kind:number,headerCount:bigint,indexCount:bigint)=>{const value=new Uint8Array(80),view=new DataView(value.buffer);view.setBigUint64(32,headerCount);view.setBigUint64(40,indexCount);return makeKlv(new Uint8Array([6,14,43,52,2,5,1,1,13,1,2,1,1,kind,1,0]),value);};
 const op1aPartitionPack=(headerCount:bigint)=>{const pack=partitionPack(2,headerCount,0n),valueOffset=17;pack.set(new Uint8Array([6,14,43,52,4,1,1,1,13,1,2,1,1,1,1,0]),valueOffset+64);return pack;};
