@@ -219,7 +219,7 @@ describe("PlayerEngine streaming mode",()=>{
     const engine=Object.create(PlayerEngine.prototype) as any;
     Object.assign(engine,{callbacks,renderer:{draw:vi.fn()},mode:"streaming",frames:[],loadGeneration:0,seekGeneration:0,destroyed:false,videoAheadSeconds:4,retainBehindSeconds:1,refillThresholdSeconds:2,chunkSeconds:3,maxReadSize:1024,dependencies:{
       createReader:()=>({size:1000n,read:vi.fn(),destroy,getStats:()=>({bytesLoaded:20n,underlyingReadCount:2,cachedBytes:10})}),
-      parseMetadata:async()=>({mediaInfo:{operationalPattern:"OP1a",essenceContainer:"060e2b34",video:{width:1920,height:1080},durationFrames:300,timecodeTrackCount:0,indexTableCount:0,indexEntryCount:0},timecodes:[],indexTables:[],partitions:[]}),
+      parseMetadata:async()=>({mediaInfo:{operationalPattern:"OP1a",essenceContainer:"060e2b34",video:{width:1920,height:1080},durationFrames:300,timecodeTrackCount:0,indexTableCount:0,indexEntryCount:0},timecodes:[],indexTables:[],partitions:[{offset:0n,kind:"header"}]}),
       indexEssence:async()=>({frameRate:30,partitions:[],packets:[{kind:"video",editUnit:0}]}),readRange,readWhole,parse:vi.fn(),loadLibav:async()=>({libavjs_with_swscale:async()=>1})
     }});
     engine.decodeVideo=async()=>[{frame:{width:2,height:2},time:0}];
@@ -228,6 +228,8 @@ describe("PlayerEngine streaming mode",()=>{
     expect(readRange).toHaveBeenCalledWith(expect.anything(),expect.anything(),expect.objectContaining({startFrame:0,endFrame:89,maxReadSize:1024,kinds:["video"]}));
     expect(destroy).not.toHaveBeenCalled();
     expect(callbacks.ready).toHaveBeenCalledOnce();
+    expect(callbacks.timecode).toHaveBeenCalledWith(null);
+    expect(callbacks.error).not.toHaveBeenCalled();
     engine.destroy();
     expect(destroy).toHaveBeenCalledOnce();
   });
