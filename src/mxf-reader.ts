@@ -10,34 +10,37 @@ const u64 = (v: Uint8Array, at: number) => new DataView(v.buffer, v.byteOffset, 
 const partitionKind = (key: Uint8Array): MxfPartitionInfo["kind"] => ({ "02": "header", "03": "body", "04": "footer" })[key[13]?.toString(16).padStart(2, "0")] as MxfPartitionInfo["kind"] ?? "unknown";
 const isPartition = (key: Uint8Array) => hex(key).startsWith("060e2b34020501010d01020101") && [2, 3, 4].includes(key[13]);
 const isMetadata = (key: Uint8Array) => { const value = hex(key); return isPartition(key) || value.startsWith("060e2b3402530101"); };
-const MAX_RUN_IN_BYTES = 65535;
+const MAX_STANDARD_RUN_IN_BYTES = 65535;
+const MAX_COMPATIBILITY_PROLOGUE_BYTES = 4 * 1024 * 1024;
 const RUN_IN_SCAN_CHUNK_BYTES = 4096;
 
 async function firstMxfOffset(reader: RandomAccessReader, signal?: AbortSignal, requirePartition = false): Promise<bigint | undefined> {
-  console.info("[H422Player] MXF start discovery", {readerSize:String(reader.size),requirePartition,maxRunInBytes:MAX_RUN_IN_BYTES,scanChunkBytes:RUN_IN_SCAN_CHUNK_BYTES});
+  console.info("[H422Player] MXF start discovery", {readerSize:String(reader.size),requirePartition,maxStandardRunInBytes:MAX_STANDARD_RUN_IN_BYTES,maxCompatibilityPrologueBytes:MAX_COMPATIBILITY_PROLOGUE_BYTES,scanChunkBytes:RUN_IN_SCAN_CHUNK_BYTES});
   if (reader.size < 16n) { console.warn("[H422Player] MXF start discovery: file is shorter than a KLV key"); return; }
   const firstKey = await reader.read(0n, 16, signal);
   const startsWithUl = firstKey[0] === 0x06 && firstKey[1] === 0x0e && firstKey[2] === 0x2b && firstKey[3] === 0x34;
+  console.info("[H422Player] MXF first key bytes", {hex:hex(firstKey),startsWithUl});
   if (!requirePartition && startsWithUl) {
     try { await readKlvHeader(reader, 0n, signal); console.info("[H422Player] MXF start discovery: valid KLV at offset 0"); return 0n; }
     catch (error) { if ((error as Error).name === "AbortError") throw error; }
   }
-  console.info("[H422Player] MXF run-in scan:start");
-  for (let start = 0; start <= MAX_RUN_IN_BYTES; start += RUN_IN_SCAN_CHUNK_BYTES) {
+  const scanLimit = Math.min(MAX_COMPATIBILITY_PROLOGUE_BYTES, Math.max(0, Number(reader.size - 16n)));
+  console.info("[H422Player] MXF prologue scan:start", {scanLimit});
+  for (let start = 0; start <= scanLimit; start += RUN_IN_SCAN_CHUNK_BYTES) {
     const available = reader.size - BigInt(start);
     if (available < 16n) break;
     const length = Number(available < BigInt(RUN_IN_SCAN_CHUNK_BYTES + 15) ? available : BigInt(RUN_IN_SCAN_CHUNK_BYTES + 15));
     const bytes = await reader.read(BigInt(start), length, signal);
-    const last = Math.min(RUN_IN_SCAN_CHUNK_BYTES - 1, MAX_RUN_IN_BYTES - start, bytes.length - 16);
+    const last = Math.min(RUN_IN_SCAN_CHUNK_BYTES - 1, scanLimit - start, bytes.length - 16);
     for (let relative = start === 0 ? 1 : 0; relative <= last; relative++) {
       if (bytes[relative] !== 0x06 || bytes[relative + 1] !== 0x0e || bytes[relative + 2] !== 0x2b || bytes[relative + 3] !== 0x34) continue;
       const offset = start + relative, key = bytes.subarray(relative, relative + 16);
       if (!isPartition(key)) continue;
-      try { await readKlvHeader(reader, BigInt(offset), signal); console.info("[H422Player] MXF run-in scan:Partition Pack found", {offset,kind:partitionKind(key)}); return BigInt(offset); }
+      try { await readKlvHeader(reader, BigInt(offset), signal); console.info("[H422Player] MXF prologue scan:Partition Pack found", {offset,kind:partitionKind(key),standardRunIn:offset<=MAX_STANDARD_RUN_IN_BYTES}); return BigInt(offset); }
       catch (error) { if ((error as Error).name === "AbortError") throw error; }
     }
   }
-  console.warn("[H422Player] MXF run-in scan:no Partition Pack found", {searchedThrough:Math.min(MAX_RUN_IN_BYTES,Number(reader.size))});
+  console.warn("[H422Player] MXF prologue scan:no Partition Pack found", {searchedThrough:scanLimit,firstKey:hex(firstKey)});
 }
 
 function partition(offset: bigint, key: Uint8Array, value: Uint8Array): MxfPartitionInfo {
@@ -116,9 +119,9 @@ export async function parseMxfMetadataFromReader(reader: RandomAccessReader, opt
       result = createMxfMetadataResult(); rates = []; partitions = [];
     }
   }
-  // SMPTE MXF permits up to 65,535 bytes of run-in before the Header Partition.
-  // A full-file parser can search past it, but a random-access parser must locate
-  // the first valid Partition Pack before walking KLV boundaries.
+  // Standard MXF run-in is bounded at 65,535 bytes. Some field-generated files
+  // contain a longer vendor prologue, so streaming performs a bounded 4 MiB
+  // compatibility scan instead of falling back to a full-file search.
   const initialOffset = await firstMxfOffset(reader, signal) ?? 0n;
   const parseSequentially = async (start: bigint): Promise<boolean> => {
     let offset = start;
