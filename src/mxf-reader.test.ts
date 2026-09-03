@@ -19,6 +19,7 @@ const be64=(value:bigint)=>{const bytes=new Uint8Array(8);new DataView(bytes.buf
 const localField=(tag:number,value:Uint8Array)=>concat(new Uint8Array([tag>>>8,tag,value.length]),value);
 const makeKlv=(key:Uint8Array,value:Uint8Array)=>concat(key,new Uint8Array([value.length]),value);
 const partitionPack=(kind:number,headerCount:bigint,indexCount:bigint)=>{const value=new Uint8Array(80),view=new DataView(value.buffer);view.setBigUint64(32,headerCount);view.setBigUint64(40,indexCount);return makeKlv(new Uint8Array([6,14,43,52,2,5,1,1,13,1,2,1,1,kind,1,0]),value);};
+const op1aPartitionPack=(headerCount:bigint)=>{const pack=partitionPack(2,headerCount,0n),valueOffset=17;pack.set(new Uint8Array([6,14,43,52,4,1,1,1,13,1,2,1,1,1,1,0]),valueOffset+64);return pack;};
 
 class SparseReader implements RandomAccessReader {
   readonly requests:Array<{offset:bigint;length:number}>=[];bytesLoaded=0n;largestRead=0;
@@ -43,3 +44,34 @@ describe("RIP-directed sparse MXF parsing",()=>{
     expect(sparse.requests.some(request=>request.offset>bodyOffset+BigInt(bodyPack.length)&&request.offset<indexOffset)).toBe(false);
   });
 });
+
+describe("MXF run-in discovery",()=>{
+  it("finds an OP1a Header Partition after run-in and parses metadata without a Timecode Track",async()=>{
+    const metadata=makeKlv(key(1),localField(0x3203,be32(1920)));
+    const runIn=new Uint8Array(4096).fill(0x55),pack=op1aPartitionPack(BigInt(metadata.length));
+    const source=runInReader(concat(runIn,pack,metadata)),parsed=await parseMxfMetadataFromReader(source);
+
+    expect(parsed.partitions).toMatchObject([{offset:4096n,kind:"header"}]);
+    expect(parsed.mediaInfo.operationalPattern).toBe("OP1a");
+    expect(parsed.mediaInfo.video?.width).toBe(1920);
+    expect(parsed.timecodes).toEqual([]);
+    expect(parsed.usedRandomIndexPack).toBe(false);
+    expect(source.getStats().largestUnderlyingRead).toBeLessThanOrEqual(4096);
+  });
+
+  it("does not scan beyond the maximum permitted run-in",async()=>{
+    const runIn=new Uint8Array(65536).fill(0x55),pack=op1aPartitionPack(0n);
+    const parsed=await parseMxfMetadataFromReader(runInReader(concat(runIn,pack)));
+    expect(parsed.partitions).toEqual([]);
+    expect(parsed.mediaInfo.operationalPattern).toBeUndefined();
+  });
+
+  it("accepts a Header Partition at the maximum permitted run-in boundary",async()=>{
+    const runIn=new Uint8Array(65535).fill(0x55),pack=op1aPartitionPack(0n);
+    const parsed=await parseMxfMetadataFromReader(runInReader(concat(runIn,pack)));
+    expect(parsed.partitions).toMatchObject([{offset:65535n,kind:"header"}]);
+    expect(parsed.mediaInfo.operationalPattern).toBe("OP1a");
+  });
+});
+
+function runInReader(data:Uint8Array){return new FileRandomAccessReader(new Blob([data]),{chunkSize:4096,maxReadSize:128*1024});}

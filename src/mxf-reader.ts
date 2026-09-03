@@ -10,6 +10,31 @@ const u64 = (v: Uint8Array, at: number) => new DataView(v.buffer, v.byteOffset, 
 const partitionKind = (key: Uint8Array): MxfPartitionInfo["kind"] => ({ "02": "header", "03": "body", "04": "footer" })[key[13]?.toString(16).padStart(2, "0")] as MxfPartitionInfo["kind"] ?? "unknown";
 const isPartition = (key: Uint8Array) => hex(key).startsWith("060e2b34020501010d01020101") && [2, 3, 4].includes(key[13]);
 const isMetadata = (key: Uint8Array) => { const value = hex(key); return isPartition(key) || value.startsWith("060e2b3402530101"); };
+const MAX_RUN_IN_BYTES = 65535;
+const RUN_IN_SCAN_CHUNK_BYTES = 4096;
+
+async function firstMxfOffset(reader: RandomAccessReader, signal?: AbortSignal): Promise<bigint | undefined> {
+  if (reader.size < 16n) return;
+  const firstKey = await reader.read(0n, 16, signal);
+  if (firstKey[0] === 0x06 && firstKey[1] === 0x0e && firstKey[2] === 0x2b && firstKey[3] === 0x34) {
+    try { await readKlvHeader(reader, 0n, signal); return 0n; }
+    catch (error) { if ((error as Error).name === "AbortError") throw error; }
+  }
+  for (let start = 0; start <= MAX_RUN_IN_BYTES; start += RUN_IN_SCAN_CHUNK_BYTES) {
+    const available = reader.size - BigInt(start);
+    if (available < 16n) break;
+    const length = Number(available < BigInt(RUN_IN_SCAN_CHUNK_BYTES + 15) ? available : BigInt(RUN_IN_SCAN_CHUNK_BYTES + 15));
+    const bytes = await reader.read(BigInt(start), length, signal);
+    const last = Math.min(RUN_IN_SCAN_CHUNK_BYTES - 1, MAX_RUN_IN_BYTES - start, bytes.length - 16);
+    for (let relative = start === 0 ? 1 : 0; relative <= last; relative++) {
+      if (bytes[relative] !== 0x06 || bytes[relative + 1] !== 0x0e || bytes[relative + 2] !== 0x2b || bytes[relative + 3] !== 0x34) continue;
+      const offset = start + relative, key = bytes.subarray(relative, relative + 16);
+      if (!isPartition(key)) continue;
+      try { await readKlvHeader(reader, BigInt(offset), signal); return BigInt(offset); }
+      catch (error) { if ((error as Error).name === "AbortError") throw error; }
+    }
+  }
+}
 
 function partition(offset: bigint, key: Uint8Array, value: Uint8Array): MxfPartitionInfo {
   const result: MxfPartitionInfo = { offset, kind: partitionKind(key) };
@@ -84,7 +109,10 @@ export async function parseMxfMetadataFromReader(reader: RandomAccessReader, opt
       result = createMxfMetadataResult(); rates = []; partitions = [];
     }
   }
-  let offset = 0n;
+  // SMPTE MXF permits up to 65,535 bytes of run-in before the Header Partition.
+  // A full-file parser can search past it, but a random-access parser must locate
+  // the first valid Partition Pack before walking KLV boundaries.
+  let offset = await firstMxfOffset(reader, signal) ?? 0n;
   while (offset < reader.size) {
     let header; try { header = await readKlvHeader(reader, offset, signal); } catch (error) { if ((error as Error).name === "AbortError") throw error; break; }
     if (isMetadata(header.key) && header.valueLength <= BigInt(max)) {
