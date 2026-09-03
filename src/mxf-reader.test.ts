@@ -67,8 +67,15 @@ describe("MXF run-in discovery",()=>{
     expect(source.getStats().largestUnderlyingRead).toBeLessThanOrEqual(4096);
   });
 
-  it("does not scan beyond the maximum permitted run-in",async()=>{
+  it("accepts a vendor prologue just beyond the standard run-in boundary",async()=>{
     const runIn=new Uint8Array(65536).fill(0x55),pack=op1aPartitionPack(0n);
+    const parsed=await parseMxfMetadataFromReader(runInReader(concat(runIn,pack)));
+    expect(parsed.partitions).toMatchObject([{offset:65536n,kind:"header"}]);
+    expect(parsed.mediaInfo.operationalPattern).toBe("OP1a");
+  });
+
+  it("does not scan beyond the bounded compatibility prologue",async()=>{
+    const runIn=new Uint8Array(4*1024*1024+1).fill(0x55),pack=op1aPartitionPack(0n);
     const parsed=await parseMxfMetadataFromReader(runInReader(concat(runIn,pack)));
     expect(parsed.partitions).toEqual([]);
     expect(parsed.mediaInfo.operationalPattern).toBeUndefined();
