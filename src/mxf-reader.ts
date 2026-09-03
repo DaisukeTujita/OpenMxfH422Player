@@ -10,6 +10,24 @@ const u64 = (v: Uint8Array, at: number) => new DataView(v.buffer, v.byteOffset, 
 const partitionKind = (key: Uint8Array): MxfPartitionInfo["kind"] => ({ "02": "header", "03": "body", "04": "footer" })[key[13]?.toString(16).padStart(2, "0")] as MxfPartitionInfo["kind"] ?? "unknown";
 const isPartition = (key: Uint8Array) => hex(key).startsWith("060e2b34020501010d01020101") && [2, 3, 4].includes(key[13]);
 const isMetadata = (key: Uint8Array) => { const value = hex(key); return isPartition(key) || value.startsWith("060e2b3402530101"); };
+const MAX_RUN_IN_BYTES = 65535;
+
+async function firstPartitionOffset(reader: RandomAccessReader, signal?: AbortSignal): Promise<bigint | undefined> {
+  const length = Number(reader.size < BigInt(MAX_RUN_IN_BYTES + 16) ? reader.size : BigInt(MAX_RUN_IN_BYTES + 16));
+  if (length < 16) return;
+  const prefix = await reader.read(0n, length, signal);
+  for (let at = 0; at + 16 <= prefix.length && at <= MAX_RUN_IN_BYTES; at++) {
+    if (prefix[at] !== 0x06 || prefix[at + 1] !== 0x0e || prefix[at + 2] !== 0x2b || prefix[at + 3] !== 0x34) continue;
+    const key = prefix.subarray(at, at + 16);
+    if (!isPartition(key)) continue;
+    try {
+      await readKlvHeader(reader, BigInt(at), signal);
+      return BigInt(at);
+    } catch (error) {
+      if ((error as Error).name === "AbortError") throw error;
+    }
+  }
+}
 
 function partition(offset: bigint, key: Uint8Array, value: Uint8Array): MxfPartitionInfo {
   const result: MxfPartitionInfo = { offset, kind: partitionKind(key) };
@@ -84,7 +102,10 @@ export async function parseMxfMetadataFromReader(reader: RandomAccessReader, opt
       result = createMxfMetadataResult(); rates = []; partitions = [];
     }
   }
-  let offset = 0n;
+  // SMPTE MXF permits up to 65,535 bytes of run-in before the Header Partition.
+  // A full-file parser can search past it, but a random-access parser must locate
+  // the first valid Partition Pack before walking KLV boundaries.
+  let offset = await firstPartitionOffset(reader, signal) ?? 0n;
   while (offset < reader.size) {
     let header; try { header = await readKlvHeader(reader, offset, signal); } catch (error) { if ((error as Error).name === "AbortError") throw error; break; }
     if (isMetadata(header.key) && header.valueLength <= BigInt(max)) {
