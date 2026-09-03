@@ -15,9 +15,9 @@ export async function readKlvHeader(reader: RandomAccessReader, offset: bigint, 
     berBytes += count;
     if (reader.size - offset < BigInt(16 + berBytes)) throw new Error("Truncated BER length");
     const encoded = await reader.read(offset + 17n, count, signal);
-    if (encoded[0] === 0) throw new Error("Invalid non-minimal BER length");
+    // MXF KLV commonly uses a fixed-width BER length (BER4), so leading zero
+    // octets and long-form values below 128 are valid interoperability forms.
     valueLength = 0n; for (const byte of encoded) valueLength = (valueLength << 8n) | BigInt(byte);
-    if (valueLength < 128n) throw new Error("Invalid non-minimal BER length");
   }
   const valueOffset = offset + BigInt(16 + berBytes), nextOffset = valueOffset + valueLength;
   if (nextOffset < valueOffset || nextOffset > reader.size) throw new Error("KLV value exceeds file range");
