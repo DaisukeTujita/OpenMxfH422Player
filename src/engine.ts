@@ -123,7 +123,8 @@ export class PlayerEngine {
       metadata.mediaInfo.selectedTimecode=timecodeInfo;
       this.timecodeSelectionReason=timecodeInfo?"Package参照解析は未対応のためKLV検出順で選択":"Timecode Trackなし"; metadata.mediaInfo.timecodeSelectionReason=this.timecodeSelectionReason;
       if(this.mode==="streaming") {
-        if(metadata.mediaInfo.operationalPattern!=="OP1a")throw new Error("Streaming requires an MXF OP1a Partition Pack");
+        if(!metadata.partitions.length)throw new Error("Streaming could not locate an MXF Partition Pack, including after a permitted run-in");
+        if(metadata.mediaInfo.operationalPattern!=="OP1a")throw new Error("Streaming requires OP1a operational-pattern metadata");
         const descriptor=metadata.mediaInfo.video;if(!descriptor?.width||!descriptor.height||!metadata.mediaInfo.essenceContainer)throw new Error("Streaming requires an identifiable XDCAM HD422 picture and Essence Container descriptor");
         if(!([[1920,1080],[1280,720]] as const).some(([width,height])=>descriptor.width===width&&descriptor.height===height))throw new Error(`Streaming does not support the ${descriptor.width}x${descriptor.height} picture descriptor`);
         this.reader=reader; const frameRate=metadata.mediaInfo.editRateNumerator&&metadata.mediaInfo.editRateDenominator?metadata.mediaInfo.editRateNumerator/metadata.mediaInfo.editRateDenominator:XDCAM_FRAME_RATE;
