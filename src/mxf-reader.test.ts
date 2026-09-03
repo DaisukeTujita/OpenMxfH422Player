@@ -43,6 +43,18 @@ describe("RIP-directed sparse MXF parsing",()=>{
     expect(sparse.requests.every(request=>request.offset===size-4n||[ripOffset,...offsets].some(base=>request.offset>=base&&request.offset<base+512n))).toBe(true);
     expect(sparse.requests.some(request=>request.offset>bodyOffset+BigInt(bodyPack.length)&&request.offset<indexOffset)).toBe(false);
   });
+
+  it("preserves parsed descriptors when a trailing KLV crosses the declared header range",async()=>{
+    const metadata=makeKlv(key(1),localField(0x3203,be32(1920)));
+    const trailing=makeKlv(new Uint8Array(16).fill(0x55),new Uint8Array(20));
+    const headerPack=partitionPack(2,BigInt(metadata.length+5),0n);
+    const ripValue=concat(be32(1),be64(0n),be32(33));
+    const rip=makeKlv(new Uint8Array([6,14,43,52,2,5,1,1,13,1,2,1,1,17,1,0]),ripValue);
+    const parsed=await parseMxfMetadataFromReader(reader(concat(headerPack,metadata,trailing,rip)));
+    expect(parsed.usedRandomIndexPack).toBe(true);
+    expect(parsed.partitions).toHaveLength(1);
+    expect(parsed.mediaInfo.video?.width).toBe(1920);
+  });
 });
 
 describe("MXF run-in discovery",()=>{
