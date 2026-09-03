@@ -1,4 +1,4 @@
-import { describe,expect,it } from "vitest";
+import { describe,expect,it,vi } from "vitest";
 import { parseMxfMetadata } from "./mxf-metadata";
 import { parseMxfMetadataFromReader } from "./mxf-reader";
 import { FileRandomAccessReader } from "./random-access-reader";
@@ -59,6 +59,36 @@ describe("RIP-directed sparse MXF parsing",()=>{
       video:{width:1920,height:1080},
     });
     expect(Boolean(parsed.mediaInfo.video?.width&&parsed.mediaInfo.video.height&&parsed.mediaInfo.essenceContainer)).toBe(true);
+  });
+
+  it("bounds post-boundary diagnostics and stops at an Essence Element",async()=>{
+    const warn=vi.spyOn(console,"warn").mockImplementation(()=>{});
+    try {
+      const metadata=makeKlv(key(1),localField(0x3203,be32(1920)));
+      const essenceKey=new Uint8Array([6,14,43,52,1,2,1,1,13,1,3,1,21,1,1,1]);
+      const essence=makeKlv(essenceKey,new Uint8Array(120).fill(0xab));
+      const trailing=Array.from({length:20},(_,index)=>makeKlv(new Uint8Array(16).fill(0x40+index),new Uint8Array(100).fill(index)));
+      const headerPack=partitionPack(2,5n,0n);
+      const ripValue=concat(be32(1),be64(0n),be32(33));
+      const rip=makeKlv(new Uint8Array([6,14,43,52,2,5,1,1,13,1,2,1,1,17,1,0]),ripValue);
+      await parseMxfMetadataFromReader(reader(concat(headerPack,metadata,essence,...trailing,rip)));
+      const entries=warn.mock.calls.map(call=>call[0]).filter((value):value is string=>typeof value==="string"&&value.startsWith("[H422Player] MXF post-boundary KLV "));
+      expect(entries).toHaveLength(1);
+      const detail=JSON.parse(entries[0].slice(entries[0].indexOf("{")));
+      expect(detail.keyType).toBe("EssenceElement");
+      expect(detail.previewHex).toHaveLength(192);
+    } finally { warn.mockRestore(); }
+  });
+
+  it("propagates AbortError raised during post-boundary diagnostics",async()=>{
+    const metadata=makeKlv(key(1),localField(0x3203,be32(1920)));
+    const filler=makeKlv(new Uint8Array(16).fill(0x55),new Uint8Array([1]));
+    const headerPack=partitionPack(2,5n,0n);
+    const ripValue=concat(be32(1),be64(0n),be32(33));
+    const rip=makeKlv(new Uint8Array([6,14,43,52,2,5,1,1,13,1,2,1,1,17,1,0]),ripValue);
+    const data=concat(headerPack,metadata,filler,rip),base=reader(data),abortOffset=BigInt(headerPack.length+metadata.length);
+    const source:RandomAccessReader={size:base.size,read:(offset,length,signal)=>{if(offset===abortOffset){const error=new Error("aborted");error.name="AbortError";throw error;}return base.read(offset,length,signal);}};
+    await expect(parseMxfMetadataFromReader(source)).rejects.toMatchObject({name:"AbortError"});
   });
 });
 
