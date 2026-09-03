@@ -45,13 +45,15 @@ export function App() {
   const [timecodeError, setTimecodeError] = useState("");
   const [seeking, setSeeking] = useState(false);
   const [buffering, setBuffering] = useState(false);
-  const [mode,setMode]=useState<PlaybackMode>("legacy");
+  const [mode,setMode]=useState<PlaybackMode>("streaming");
   const [diagnostics,setDiagnostics]=useState<PlayerDiagnostics>();
   const selectedStartTimecode = mediaInfo?.selectedTimecode
     ? formatTimecodeFrame(mediaInfo.selectedTimecode.startFrame, mediaInfo.selectedTimecode.roundedTimecodeBase, mediaInfo.selectedTimecode.dropFrame)
     : undefined;
 
   const selectFile = (nextFile?: File) => {
+    if (nextFile) console.info("[H422Player example] MXF selected", { name: nextFile.name, size: nextFile.size, type: nextFile.type || "(empty)", lastModified: new Date(nextFile.lastModified).toISOString(), mode });
+    else console.info("[H422Player example] MXF selection cleared", { mode });
     setFile(nextFile);
     setError("");
     setInfo(undefined);
@@ -100,13 +102,18 @@ export function App() {
       </header>
 
       <section className="panel file-panel">
-        <label>再生方式 <select value={mode} onChange={event=>{setBuffering(false);setMode(event.target.value as PlaybackMode);}}><option value="legacy">legacy（安定版）</option><option value="streaming">streaming（実験的）</option></select></label>
+        <label className="mode-control">再生方式
+          <select value={mode} onChange={event=>{const nextMode=event.target.value as PlaybackMode;console.info("[H422Player example] playback mode changed", { from: mode, to: nextMode });setBuffering(false);setMode(nextMode);}}>
+            <option value="streaming">Streaming</option>
+            <option value="legacy">Legacy</option>
+          </select>
+        </label>
         <label className="file-picker">
-          <span>MXFファイルを選択</span>
+          <span>MXF選択</span>
           <input type="file" accept=".mxf,application/mxf" onChange={(event) => selectFile(event.target.files?.[0])} />
         </label>
-        <span className="filename">{file?.name ?? "ファイルが選択されていません"}</span>
-        {mode === "streaming" && <strong>実験的な部分読み込みモードです。対応音声: PCM S24BE / 48 kHz / 24-bit / stereo。未対応音声形式では映像のみ再生します</strong>}
+        <span className="filename" title={file?.name}>{file?.name ?? "未選択"}</span>
+        <span className="mode-note" title={mode === "streaming" ? "必要な区間を部分読み込みします。対応外の音声形式では映像のみ再生します。" : "ファイル全体を読み込む互換モードです。"}>{mode === "streaming" ? "部分読み込み" : "互換モード"}</span>
       </section>
 
       <section className="viewer" aria-label="MXF player">
