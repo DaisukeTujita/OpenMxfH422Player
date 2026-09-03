@@ -81,25 +81,32 @@ const diagnosticKeyType = (key: Uint8Array): string => {
   return "Unknown";
 };
 
-async function diagnoseAfterDeclaredBoundary(reader: RandomAccessReader, start: bigint, declaredEnd: bigint, signal?: AbortSignal): Promise<void> {
-  const maxEntries=16, maxDistance=256n*1024n;
-  let offset=start;
-  console.warn(`[H422Player] MXF post-boundary diagnostic:start ${JSON.stringify({start:String(start),declaredEnd:String(declaredEnd),maxEntries,maxDistance:String(maxDistance)})}`);
+async function recoverAfterDeclaredBoundary(reader: RandomAccessReader, start: bigint, declaredEnd: bigint, result: MxfMetadataResult, rates: Array<readonly [number, number]>, max: number, signal?: AbortSignal, owner?: MxfPartitionInfo): Promise<void> {
+  const maxEntries=128, maxDistance=1024n*1024n;
+  let offset=start, parsedCount=0, stopReason="limit";
+  console.info(`[H422Player] MXF post-boundary recovery:start ${JSON.stringify({start:String(start),declaredEnd:String(declaredEnd),maxEntries,maxDistance:String(maxDistance)})}`);
   for(let index=0;index<maxEntries&&offset<reader.size&&offset-start<maxDistance;index++){
     try {
-      const header=await readKlvHeader(reader,offset,signal);
+      const header=await readKlvHeader(reader,offset,signal),keyType=diagnosticKeyType(header.key);
       const previewLength=Number(header.valueLength<96n?header.valueLength:96n);
       const preview=previewLength?await reader.read(header.valueOffset,previewLength,signal):new Uint8Array();
-      const entry={index,offset:String(offset),key:hex(header.key),keyType:diagnosticKeyType(header.key),valueOffset:String(header.valueOffset),valueLength:String(header.valueLength),nextOffset:String(header.nextOffset),distanceAfterDeclaredEnd:String(offset-declaredEnd),previewHex:hex(preview)};
-      console.warn(`[H422Player] MXF post-boundary KLV ${JSON.stringify(entry)}`);
-      if(isPartition(header.key)||diagnosticKeyType(header.key)==="EssenceElement") break;
+      console.info(`[H422Player] MXF post-boundary KLV ${JSON.stringify({index,offset:String(offset),key:hex(header.key),keyType,valueOffset:String(header.valueOffset),valueLength:String(header.valueLength),nextOffset:String(header.nextOffset),distanceAfterDeclaredEnd:String(offset-declaredEnd),previewHex:hex(preview)})}`);
+      if(isPartition(header.key)||keyType==="EssenceElement"||keyType==="RandomIndexPack"){stopReason=keyType;break;}
+      if(isMetadata(header.key)&&header.valueLength<=BigInt(max)){
+        const previousTableCount=result.indexTables.length;
+        parseMxfMetadataKlv(result,header.key,await readKlvValue(reader,header,max,signal),rates);
+        for(let table=previousTableCount;table<result.indexTables.length;table++){result.indexTables[table].bodySid=owner?.bodySid;result.indexTables[table].indexSid=owner?.indexSid;}
+        parsedCount++;
+      }
       offset=header.nextOffset;
     } catch(error) {
       if ((error as Error).name === "AbortError") throw error;
-      console.warn(`[H422Player] MXF post-boundary diagnostic:stopped ${JSON.stringify({offset:String(offset),reason:error instanceof Error?error.message:String(error)})}`);
+      stopReason=error instanceof Error?error.message:String(error);
+      console.warn(`[H422Player] MXF post-boundary recovery:stopped ${JSON.stringify({offset:String(offset),reason:stopReason})}`);
       break;
     }
   }
+  console.info(`[H422Player] MXF post-boundary recovery:complete ${JSON.stringify({parsedCount,stopReason,finalOffset:String(offset),distance:String(offset-start)})}`);
 }
 
 async function parseRange(reader: RandomAccessReader, start: bigint, end: bigint, result: MxfMetadataResult, rates: Array<readonly [number, number]>, max: number, signal?: AbortSignal, owner?: MxfPartitionInfo): Promise<void> {
@@ -116,8 +123,8 @@ async function parseRange(reader: RandomAccessReader, start: bigint, end: bigint
       }
     }
     if (crossesDeclaredEnd) {
-      console.warn("[H422Player] MXF metadata KLV crosses declared partition boundary; parsed bounded value then stopped", {offset:String(offset),declaredEnd:String(end),klvEnd:String(header.nextOffset),overrunBytes:String(header.nextOffset-end),key:hex(header.key),keyType:diagnosticKeyType(header.key),parsed:isMetadata(header.key)&&header.valueLength<=BigInt(max)});
-      await diagnoseAfterDeclaredBoundary(reader,header.nextOffset,end,signal);
+      console.info("[H422Player] MXF metadata KLV crosses declared partition boundary; recovering bounded metadata after boundary", {offset:String(offset),declaredEnd:String(end),klvEnd:String(header.nextOffset),overrunBytes:String(header.nextOffset-end),key:hex(header.key),keyType:diagnosticKeyType(header.key),parsed:isMetadata(header.key)&&header.valueLength<=BigInt(max)});
+      await recoverAfterDeclaredBoundary(reader,header.nextOffset,end,result,rates,max,signal,owner);
       break;
     }
     offset = header.nextOffset;
