@@ -46,6 +46,14 @@ describe("RIP-directed sparse MXF parsing",()=>{
 });
 
 describe("MXF run-in discovery",()=>{
+  it("does not mistake a KLV-like run-in prefix for the first Partition Pack",async()=>{
+    const misleading=makeKlv(key(1),new Uint8Array([1,2,3]));
+    const padding=new Uint8Array(64).fill(0x55),pack=op1aPartitionPack(0n);
+    const parsed=await parseMxfMetadataFromReader(runInReader(concat(misleading,padding,pack)));
+    expect(parsed.partitions).toMatchObject([{offset:BigInt(misleading.length+padding.length),kind:"header"}]);
+    expect(parsed.mediaInfo.operationalPattern).toBe("OP1a");
+  });
+
   it("finds an OP1a Header Partition after run-in and parses metadata without a Timecode Track",async()=>{
     const metadata=makeKlv(key(1),localField(0x3203,be32(1920)));
     const runIn=new Uint8Array(4096).fill(0x55),pack=op1aPartitionPack(BigInt(metadata.length));
