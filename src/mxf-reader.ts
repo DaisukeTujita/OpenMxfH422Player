@@ -73,10 +73,7 @@ async function parseRange(reader: RandomAccessReader, start: bigint, end: bigint
   let offset = start;
   while (offset < end) {
     const header = await readKlvHeader(reader, offset, signal);
-    if (header.nextOffset > end) {
-      console.warn("[H422Player] MXF declared partition range ends inside KLV; preserving metadata parsed before the boundary", {offset:String(offset),declaredEnd:String(end),klvEnd:String(header.nextOffset),key:hex(header.key)});
-      break;
-    }
+    const crossesDeclaredEnd = header.nextOffset > end;
     if (isMetadata(header.key) && header.valueLength <= BigInt(max)) {
       const previousTableCount = result.indexTables.length;
       parseMxfMetadataKlv(result, header.key, await readKlvValue(reader, header, max, signal), rates);
@@ -84,6 +81,10 @@ async function parseRange(reader: RandomAccessReader, start: bigint, end: bigint
         result.indexTables[index].bodySid = owner?.bodySid;
         result.indexTables[index].indexSid = owner?.indexSid;
       }
+    }
+    if (crossesDeclaredEnd) {
+      console.warn("[H422Player] MXF metadata KLV crosses declared partition boundary; parsed bounded value then stopped", {offset:String(offset),declaredEnd:String(end),klvEnd:String(header.nextOffset),overrunBytes:String(header.nextOffset-end),key:hex(header.key),parsed:isMetadata(header.key)&&header.valueLength<=BigInt(max)});
+      break;
     }
     offset = header.nextOffset;
   }
