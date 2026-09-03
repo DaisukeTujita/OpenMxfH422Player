@@ -57,13 +57,15 @@ type DecoderMock = {
 function decoderHarness(av: DecoderMock) {
   const engine = Object.create(PlayerEngine.prototype) as {
     libav: DecoderMock;
-    decodeVideo(chunks: Uint8Array[], codecId: number): Promise<void>;
+    decodeVideo(chunks: Uint8Array[], codecId: number, av?: DecoderMock, mediaFrames?: number[], frameRate?: number): Promise<Array<{ time: number; mediaFrame: number }>>;
   };
   engine.libav = av;
   return engine;
 }
 
 describe("PlayerEngine decoder cleanup", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
   it("frees ctx, pkt, and frame exactly once after successful decoding", async () => {
     const [codec, ctx, pkt, frame] = [11, 22, 33, 44];
     const av = {
@@ -114,6 +116,49 @@ describe("PlayerEngine decoder cleanup", () => {
 
     await expect(decoderHarness(av).decodeVideo([], 2)).rejects.toBe(cleanupError);
     expect(av.ff_free_decoder).toHaveBeenCalledOnce();
+  });
+
+  it("falls back to input edit-unit order when decoded PTS uses another time base", async () => {
+    vi.stubGlobal("ImageData", class { constructor(public data: Uint8ClampedArray, public width: number, public height: number) {} });
+    const decodedFrame = (pts: number) => ({
+      pts, width: 2, height: 1, format: 4,
+      data: new Uint8Array([16, 16, 128, 128]),
+      layout: [{ offset: 0, stride: 2 }, { offset: 2, stride: 1 }, { offset: 3, stride: 1 }],
+    });
+    const av = {
+      AV_PIX_FMT_YUV422P: 4,
+      ff_init_decoder: vi.fn().mockResolvedValue([11, 22, 33, 44]),
+      ff_decode_multi: vi.fn().mockResolvedValue([decodedFrame(90_090), decodedFrame(180_180)]),
+      ff_free_decoder: vi.fn().mockResolvedValue(undefined),
+    };
+
+    const frames = await decoderHarness(av).decodeVideo(
+      [new Uint8Array([1]), new Uint8Array([2])], 2, av, [100, 101], 25,
+    );
+
+    expect(frames.map(item => item.mediaFrame)).toEqual([100, 101]);
+    expect(frames.map(item => item.time)).toEqual([4, 4.04]);
+  });
+
+  it("keeps valid decoded PTS so reordered MPEG-2 output retains its edit units", async () => {
+    vi.stubGlobal("ImageData", class { constructor(public data: Uint8ClampedArray, public width: number, public height: number) {} });
+    const decodedFrame = (pts: number) => ({
+      pts, width: 2, height: 1, format: 4,
+      data: new Uint8Array([16, 16, 128, 128]),
+      layout: [{ offset: 0, stride: 2 }, { offset: 2, stride: 1 }, { offset: 3, stride: 1 }],
+    });
+    const av = {
+      AV_PIX_FMT_YUV422P: 4,
+      ff_init_decoder: vi.fn().mockResolvedValue([11, 22, 33, 44]),
+      ff_decode_multi: vi.fn().mockResolvedValue([decodedFrame(102), decodedFrame(100), decodedFrame(101)]),
+      ff_free_decoder: vi.fn().mockResolvedValue(undefined),
+    };
+
+    const frames = await decoderHarness(av).decodeVideo(
+      [new Uint8Array([1]), new Uint8Array([2]), new Uint8Array([3])], 2, av, [100, 101, 102], 25,
+    );
+
+    expect(frames.map(item => item.mediaFrame)).toEqual([102, 100, 101]);
   });
 });
 

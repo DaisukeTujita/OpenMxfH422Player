@@ -184,6 +184,7 @@ export class PlayerEngine {
       const rateScale=Number.isInteger(frameRate)?1:1001,rateDenominator=Math.round(frameRate*rateScale);
       const packets=chunks.map((data,i)=>({data,pts:mediaFrames[i]??i,time_base_num:rateScale,time_base_den:rateDenominator}));
       const decoded=await av.ff_decode_multi(ctx,pkt,frame,packets,true) as DecodedFrame[];
+      const inputMediaFrames=new Set(mediaFrames);
       for (let i=0;i<decoded.length;i++) {
         const f=decoded[i]; if (!f.data) continue;
         if (f.format !== av.AV_PIX_FMT_YUV422P || !f.layout || f.layout.length < 3)
@@ -195,7 +196,12 @@ export class PlayerEngine {
         };
         const chromaWidth=Math.ceil(f.width/2);
         const rgba=yuv422pToRgba(plane(0,f.width),plane(1,chromaWidth),plane(2,chromaWidth),f.width,f.height);
-        const decodedPts=f.pts===undefined?Number.NaN:Number(f.pts),mediaFrame=Number.isSafeInteger(decodedPts)?decodedPts:mediaFrames[i]??i;frames.push({frame:new ImageData(new Uint8ClampedArray(rgba),f.width,f.height),time:mediaFrame/frameRate,mediaFrame});
+        // libav.js builds may return decoded PTS in a codec time base rather than
+        // the edit-unit values assigned to the input packets. Only use a PTS that
+        // maps to this decode batch; otherwise retain decoder output order.
+        const decodedPts=f.pts===undefined?Number.NaN:Number(f.pts);
+        const mediaFrame=Number.isSafeInteger(decodedPts)&&inputMediaFrames.has(decodedPts)?decodedPts:mediaFrames[i]??i;
+        frames.push({frame:new ImageData(new Uint8ClampedArray(rgba),f.width,f.height),time:mediaFrame/frameRate,mediaFrame});
       }
     } catch (error) {
       decodeFailure={error};
