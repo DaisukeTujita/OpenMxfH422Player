@@ -14,13 +14,15 @@ const MAX_RUN_IN_BYTES = 65535;
 const RUN_IN_SCAN_CHUNK_BYTES = 4096;
 
 async function firstMxfOffset(reader: RandomAccessReader, signal?: AbortSignal, requirePartition = false): Promise<bigint | undefined> {
-  if (reader.size < 16n) return;
+  console.info("[H422Player] MXF start discovery", {readerSize:String(reader.size),requirePartition,maxRunInBytes:MAX_RUN_IN_BYTES,scanChunkBytes:RUN_IN_SCAN_CHUNK_BYTES});
+  if (reader.size < 16n) { console.warn("[H422Player] MXF start discovery: file is shorter than a KLV key"); return; }
   const firstKey = await reader.read(0n, 16, signal);
   const startsWithUl = firstKey[0] === 0x06 && firstKey[1] === 0x0e && firstKey[2] === 0x2b && firstKey[3] === 0x34;
   if (!requirePartition && startsWithUl) {
-    try { await readKlvHeader(reader, 0n, signal); return 0n; }
+    try { await readKlvHeader(reader, 0n, signal); console.info("[H422Player] MXF start discovery: valid KLV at offset 0"); return 0n; }
     catch (error) { if ((error as Error).name === "AbortError") throw error; }
   }
+  console.info("[H422Player] MXF run-in scan:start");
   for (let start = 0; start <= MAX_RUN_IN_BYTES; start += RUN_IN_SCAN_CHUNK_BYTES) {
     const available = reader.size - BigInt(start);
     if (available < 16n) break;
@@ -31,10 +33,11 @@ async function firstMxfOffset(reader: RandomAccessReader, signal?: AbortSignal, 
       if (bytes[relative] !== 0x06 || bytes[relative + 1] !== 0x0e || bytes[relative + 2] !== 0x2b || bytes[relative + 3] !== 0x34) continue;
       const offset = start + relative, key = bytes.subarray(relative, relative + 16);
       if (!isPartition(key)) continue;
-      try { await readKlvHeader(reader, BigInt(offset), signal); return BigInt(offset); }
+      try { await readKlvHeader(reader, BigInt(offset), signal); console.info("[H422Player] MXF run-in scan:Partition Pack found", {offset,kind:partitionKind(key)}); return BigInt(offset); }
       catch (error) { if ((error as Error).name === "AbortError") throw error; }
     }
   }
+  console.warn("[H422Player] MXF run-in scan:no Partition Pack found", {searchedThrough:Math.min(MAX_RUN_IN_BYTES,Number(reader.size))});
 }
 
 function partition(offset: bigint, key: Uint8Array, value: Uint8Array): MxfPartitionInfo {
@@ -97,12 +100,15 @@ async function parseFromRip(reader: RandomAccessReader, offsets: bigint[], resul
 
 /** Parses metadata and index KLVs while skipping essence values by their BER lengths. */
 export async function parseMxfMetadataFromReader(reader: RandomAccessReader, options: { signal?: AbortSignal; maxMetadataValueSize?: number } = {}): Promise<MxfReaderResult> {
+  console.info("[H422Player] MXF metadata parse:start", {readerSize:String(reader.size)});
   const { signal } = options, max = options.maxMetadataValueSize ?? 4 * 1024 * 1024;
   let result = createMxfMetadataResult(), rates: Array<readonly [number, number]> = [], partitions: MxfPartitionInfo[] = [];
   const rip = await ripOffsets(reader, signal).catch(error => { if ((error as Error).name === "AbortError") throw error; return undefined; });
+  console.info("[H422Player] MXF RIP probe", {found:Boolean(rip),offsetCount:rip?.length??0});
   if (rip) {
     try {
       partitions = await parseFromRip(reader, rip, result, rates, max, signal);
+      console.info("[H422Player] MXF metadata parse:complete via RIP", {partitionCount:partitions.length});
       return Object.assign(finalizeMxfMetadata(result, rates), { partitions, usedRandomIndexPack: true });
     } catch (error) {
       if ((error as Error).name === "AbortError") throw error;
@@ -121,6 +127,7 @@ export async function parseMxfMetadataFromReader(reader: RandomAccessReader, opt
       try { header = await readKlvHeader(reader, offset, signal); }
       catch (error) {
         if ((error as Error).name === "AbortError") throw error;
+        console.warn("[H422Player] MXF sequential KLV walk stopped", {offset:String(offset),reason:error instanceof Error?error.message:String(error)});
         return false;
       }
       if (isMetadata(header.key) && header.valueLength <= BigInt(max)) {
@@ -134,11 +141,13 @@ export async function parseMxfMetadataFromReader(reader: RandomAccessReader, opt
   };
   const reachedEnd = await parseSequentially(initialOffset);
   if (!reachedEnd && initialOffset === 0n && partitions.length === 0) {
+    console.info("[H422Player] MXF metadata parse:retrying with Partition-only run-in scan");
     const runInOffset = await firstMxfOffset(reader, signal, true);
     if (runInOffset !== undefined) {
       result = createMxfMetadataResult(); rates = []; partitions = [];
       await parseSequentially(runInOffset);
     }
   }
+  console.info("[H422Player] MXF metadata parse:complete sequentially", {initialOffset:String(initialOffset),reachedEnd,partitionCount:partitions.length,indexTableCount:result.indexTables.length,timecodeTrackCount:result.timecodes.length});
   return Object.assign(finalizeMxfMetadata(result, rates), { partitions: partitions.sort((a, b) => a.offset < b.offset ? -1 : 1), usedRandomIndexPack: false });
 }
