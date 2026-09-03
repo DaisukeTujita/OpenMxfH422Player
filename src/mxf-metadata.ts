@@ -31,12 +31,14 @@ const i64 = (v: Uint8Array) => Number(new DataView(v.buffer, v.byteOffset, v.byt
 const u64 = (v: Uint8Array) => new DataView(v.buffer, v.byteOffset, v.byteLength).getBigUint64(0);
 const rational = (v?: Uint8Array) => v && v.length >= 8 ? [u32(v.subarray(0, 4)), u32(v.subarray(4, 8))] as const : undefined;
 
-function localSet(value: Uint8Array): Fields {
+function localSet(value: Uint8Array, fixedLengthBytes = false): Fields {
   const fields: Fields = new Map();
   let at = 0;
-  while (at + 3 <= value.length) {
+  while (at + (fixedLengthBytes ? 4 : 3) <= value.length) {
     const tag = (value[at] << 8) | value[at + 1];
-    const length = readBer(value, at + 2);
+    const length = fixedLengthBytes
+      ? { value: (value[at + 2] << 8) | value[at + 3], bytes: 2 }
+      : readBer(value, at + 2);
     const start = at + 2 + length.bytes, end = start + length.value;
     if (end > value.length) break;
     fields.set(tag, value.subarray(start, end));
@@ -75,9 +77,9 @@ export function parseMxfMetadataKlv(result: MxfMetadataResult, key: Uint8Array, 
     const op = text(value.subarray(64, 80));
     if (op.startsWith("060e2b34040101010d01020101")) result.mediaInfo.operationalPattern = "OP1a";
   } else if (keyHex.startsWith("060e2b34025301010d0102010110")) {
-    try { const index = parseIndex(localSet(value)); if (index) result.indexTables.push(index); } catch { /* A corrupt index is non-fatal. */ }
+    try { const index = parseIndex(localSet(value, key[5] === 0x53)); if (index) result.indexTables.push(index); } catch { /* A corrupt index is non-fatal. */ }
   } else if (keyHex.startsWith("060e2b3402530101")) {
-    let fields: Fields; try { fields = localSet(value); } catch { return; }
+    let fields: Fields; try { fields = localSet(value, key[5] === 0x53); } catch { return; }
     const rate = rational(fields.get(0x4b01)); if (rate) editRates.push(rate);
     const startTc = fields.get(0x1501), base = fields.get(0x1502), drop = fields.get(0x1503);
     if (startTc && base && drop) result.timecodes.push({ startFrame: i64(startTc), roundedTimecodeBase: u16(base), dropFrame: drop[0] !== 0, editRateNumerator: rate?.[0] ?? 0, editRateDenominator: rate?.[1] ?? 0, durationFrames: fields.get(0x0202) ? i64(fields.get(0x0202)!) : undefined, source: "mxf" });
