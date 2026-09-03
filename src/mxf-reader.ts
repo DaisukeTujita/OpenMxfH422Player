@@ -95,6 +95,7 @@ async function diagnoseAfterDeclaredBoundary(reader: RandomAccessReader, start: 
       if(isPartition(header.key)||diagnosticKeyType(header.key)==="EssenceElement") break;
       offset=header.nextOffset;
     } catch(error) {
+      if ((error as Error).name === "AbortError") throw error;
       console.warn(`[H422Player] MXF post-boundary diagnostic:stopped ${JSON.stringify({offset:String(offset),reason:error instanceof Error?error.message:String(error)})}`);
       break;
     }
