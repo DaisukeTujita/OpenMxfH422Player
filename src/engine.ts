@@ -25,7 +25,7 @@ export interface PlayerEngineDependencies {
   readRange: typeof readEssenceRange;
 }
 const defaultDependencies: PlayerEngineDependencies = {
-  createReader: blob=>new FileRandomAccessReader(blob), parseMetadata:(reader,signal)=>parseMxfMetadataFromReader(reader,{signal}),
+  createReader: blob=>new FileRandomAccessReader(blob,{debug:message=>console.info(`[H422Player] ${message}`)}), parseMetadata:(reader,signal)=>parseMxfMetadataFromReader(reader,{signal}),
   readWhole:async blob=>new Uint8Array(await blob.slice(0,blob.size).arrayBuffer()), parse:parseMxf, loadLibav:loadCustomLibAV, indexEssence:indexMxfEssence, readRange:readEssenceRange,
 };
 
@@ -111,30 +111,34 @@ export class PlayerEngine {
     this.loadController?.abort(); const controller=new AbortController(); this.loadController=controller; const {signal}=controller, generation=++this.loadGeneration;
     const current=()=>!signal.aborted&&!this.destroyed&&this.loadGeneration===generation;
     this.setStatus("loading");
+    console.info("[H422Player] load:start", { generation, mode:this.mode, source:typeof source === "string" ? source : source instanceof File ? source.name : "Blob" });
     let localReader:(RandomAccessReader & {destroy():void})|undefined;try {
       const blob=typeof source === "string" ? await fetch(source,{signal}).then(r=>{if(!r.ok)throw new Error(`MXF request failed (${r.status})`);return r.blob();}) : source; this.fileSize=blob.size;
+      console.info("[H422Player] load:source-ready", { generation, mode:this.mode, fileSize:blob.size, type:blob.type||"(empty)" });
       if(!current())return;
       const reader=this.dependencies.createReader(blob);localReader=reader;if(this.mode==="streaming")this.reader=reader;
+      console.info("[H422Player] metadata:start", { generation, readerSize:String(reader.size) });
       let metadata;
-      try { metadata=await this.dependencies.parseMetadata(reader,signal); }
+      try { metadata=await this.dependencies.parseMetadata(reader,signal); console.info("[H422Player] metadata:complete", { generation, partitions:metadata.partitions.map(item=>({offset:String(item.offset),kind:item.kind,bodySid:item.bodySid,indexSid:item.indexSid})), operationalPattern:metadata.mediaInfo.operationalPattern??null, essenceContainer:metadata.mediaInfo.essenceContainer??null, video:metadata.mediaInfo.video??null, audio:metadata.mediaInfo.audio??null, indexTables:metadata.indexTables.length, timecodeTracks:metadata.timecodes.length }); }
       finally { if(this.mode!=="streaming"||!current())this.destroyReader(reader); }
       if(!current())return;
       const timecodeInfo=selectTimecodeTrack(metadata.timecodes);
       metadata.mediaInfo.selectedTimecode=timecodeInfo;
       this.timecodeSelectionReason=timecodeInfo?"Package参照解析は未対応のためKLV検出順で選択":"Timecode Trackなし"; metadata.mediaInfo.timecodeSelectionReason=this.timecodeSelectionReason;
       if(this.mode==="streaming") {
+        console.info("[H422Player] streaming:validate-metadata", { generation, partitionCount:metadata.partitions.length });
         if(!metadata.partitions.length)throw new Error("Streaming could not locate an MXF Partition Pack, including after a permitted run-in");
         if(metadata.mediaInfo.operationalPattern!=="OP1a")throw new Error("Streaming requires OP1a operational-pattern metadata");
         const descriptor=metadata.mediaInfo.video;if(!descriptor?.width||!descriptor.height||!metadata.mediaInfo.essenceContainer)throw new Error("Streaming requires an identifiable XDCAM HD422 picture and Essence Container descriptor");
         if(!([[1920,1080],[1280,720]] as const).some(([width,height])=>descriptor.width===width&&descriptor.height===height))throw new Error(`Streaming does not support the ${descriptor.width}x${descriptor.height} picture descriptor`);
-        this.reader=reader; const frameRate=metadata.mediaInfo.editRateNumerator&&metadata.mediaInfo.editRateDenominator?metadata.mediaInfo.editRateNumerator/metadata.mediaInfo.editRateDenominator:XDCAM_FRAME_RATE;
-        this.indexTables=metadata.indexTables; this.essenceIndex=await this.dependencies.indexEssence(reader,{partitions:metadata.partitions,indexTables:metadata.indexTables,frameRate,signal}); if(!current())return;
+        this.reader=reader; console.info("[H422Player] streaming:index:start", { generation }); const frameRate=metadata.mediaInfo.editRateNumerator&&metadata.mediaInfo.editRateDenominator?metadata.mediaInfo.editRateNumerator/metadata.mediaInfo.editRateDenominator:XDCAM_FRAME_RATE;
+        this.indexTables=metadata.indexTables; this.essenceIndex=await this.dependencies.indexEssence(reader,{partitions:metadata.partitions,indexTables:metadata.indexTables,frameRate,signal}); console.info("[H422Player] streaming:index:complete", { generation, packets:this.essenceIndex.packets.length, videoPackets:this.essenceIndex.packets.filter(packet=>packet.kind==="video").length, audioPackets:this.essenceIndex.packets.filter(packet=>packet.kind==="audio").length, frameRate }); if(!current())return;
         if(!this.essenceIndex.packets.some(packet=>packet.kind==="video"))throw new Error("Streaming requires MPEG-2 video essence");
-        const libav=await this.dependencies.loadLibav(this.libavBase);if(!current())return;if(await libav.libavjs_with_swscale?.()!==1)throw new Error("Custom libav.js was built without swscale");
+        console.info("[H422Player] streaming:libav:start", { generation, base:this.libavBase }); const libav=await this.dependencies.loadLibav(this.libavBase);console.info("[H422Player] streaming:libav:complete", { generation });if(!current())return;if(await libav.libavjs_with_swscale?.()!==1)throw new Error("Custom libav.js was built without swscale");
         this.libav=libav;this.timecodeInfo=timecodeInfo;this.durationValue=(metadata.mediaInfo.durationFrames??this.essenceIndex.packets.filter(p=>p.kind==="video").length)/frameRate;this.frames=[];this.queuedThroughFrame=-1;
         this.configureStreamingAudio(metadata.mediaInfo);
-        const initialFill=new AbortController();this.fillController=initialFill;await Promise.all([this.fillStreaming(0,initialFill.signal,generation,this.seekGeneration),this.fillStreamingAudio(0,initialFill.signal,generation,this.seekGeneration)]);if(this.fillController===initialFill)this.fillController=undefined;if(!current())return;const first=this.frames[0];if(!first)throw new Error("The MPEG-2 decoder returned no frames");
-        this.renderer.draw(first.frame,first.frame.width,first.frame.height);this.callbacks.mediaInfo?.(metadata.mediaInfo);this.callbacks.timecode?.(timecodeInfo?timecodeAtSeconds(timecodeInfo,0):null);this.callbacks.ready({width:first.frame.width,height:first.frame.height,frameRate,duration:this.durationValue,audioSampleRate:this.audioSampleRate??48000,audioChannels:this.streamingAudioSupported?this.audioChannels!:0});this.setStatus("ready");this.publishDiagnostics();return;
+        console.info("[H422Player] streaming:initial-fill:start", { generation }); const initialFill=new AbortController();this.fillController=initialFill;await Promise.all([this.fillStreaming(0,initialFill.signal,generation,this.seekGeneration),this.fillStreamingAudio(0,initialFill.signal,generation,this.seekGeneration)]);if(this.fillController===initialFill)this.fillController=undefined;if(!current())return;const first=this.frames[0];if(!first)throw new Error("The MPEG-2 decoder returned no frames");
+        this.renderer.draw(first.frame,first.frame.width,first.frame.height);this.callbacks.mediaInfo?.(metadata.mediaInfo);this.callbacks.timecode?.(timecodeInfo?timecodeAtSeconds(timecodeInfo,0):null);this.callbacks.ready({width:first.frame.width,height:first.frame.height,frameRate,duration:this.durationValue,audioSampleRate:this.audioSampleRate??48000,audioChannels:this.streamingAudioSupported?this.audioChannels!:0});this.setStatus("ready");this.publishDiagnostics();console.info("[H422Player] streaming:ready", { generation, duration:this.durationValue, frames:this.frames.length, diagnostics:this.getDiagnostics() });return;
       }
       // Compatibility path intentionally retains contiguous full-file decoding.
       const bytes=await this.dependencies.readWhole(blob);
@@ -155,7 +159,7 @@ export class PlayerEngine {
       this.callbacks.mediaInfo?.(metadata.mediaInfo);this.callbacks.timecode?.(timecodeInfo ? timecodeAtSeconds(timecodeInfo,0) : null);
       this.callbacks.ready({width:first.frame.width,height:first.frame.height,frameRate:XDCAM_FRAME_RATE,duration,audioSampleRate:48000,audioChannels:audio.length?2:0});
       this.setStatus("ready");
-    } catch (e) { const error=e instanceof Error?e:new Error(String(e)); if(error.name!=="AbortError"&&current())this.publishDiagnostics(); if(localReader)this.releaseReader(localReader); if(error.name==="AbortError"||!current())return; this.setStatus("error"); this.callbacks.error(error); throw error; }
+    } catch (e) { const error=e instanceof Error?e:new Error(String(e)); if(error.name!=="AbortError"&&current()){this.publishDiagnostics();console.error("[H422Player] load:failed", { generation, mode:this.mode, stageStatus:this.status, error, diagnostics:this.getDiagnostics() });} if(localReader)this.releaseReader(localReader); if(error.name==="AbortError"||!current())return; this.setStatus("error"); this.callbacks.error(error); throw error; }
   }
   private async fillStreaming(targetFrame:number,signal:AbortSignal,loadGeneration:number,seekGeneration=this.seekGeneration,decodeStartFrame?:number):Promise<boolean>{
     if(!this.reader||!this.essenceIndex||!this.libav)return false;
