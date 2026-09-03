@@ -73,7 +73,7 @@ async function parseRange(reader: RandomAccessReader, start: bigint, end: bigint
   let offset = start;
   while (offset < end) {
     const header = await readKlvHeader(reader, offset, signal);
-    if (header.nextOffset > end) throw new Error("KLV exceeds declared partition range");
+    if (header.nextOffset > end) {\n      console.warn("[H422Player] MXF declared partition range ends inside KLV; preserving metadata parsed before the boundary", {offset:String(offset),declaredEnd:String(end),klvEnd:String(header.nextOffset),key:hex(header.key)});\n      break;\n    }
     if (isMetadata(header.key) && header.valueLength <= BigInt(max)) {
       const previousTableCount = result.indexTables.length;
       parseMxfMetadataKlv(result, header.key, await readKlvValue(reader, header, max, signal), rates);
