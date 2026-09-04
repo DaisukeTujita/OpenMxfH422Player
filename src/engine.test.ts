@@ -162,6 +162,28 @@ describe("PlayerEngine decoder cleanup", () => {
   });
 });
 
+describe("PlayerEngine streaming decoder reuse", () => {
+  it("reuses one decoder across adjacent chunks and flushes it only at the end", async () => {
+    const av={AV_PIX_FMT_YUV422P:4,ff_init_decoder:vi.fn().mockResolvedValue([11,22,33,44]),ff_decode_multi:vi.fn().mockResolvedValue([]),ff_free_decoder:vi.fn().mockResolvedValue(undefined)};
+    const engine=Object.create(PlayerEngine.prototype) as any;Object.assign(engine,{libav:av,videoCodecId:2,durationValue:10});
+    await engine.decodeStreamingVideo([new Uint8Array([1])],[0],30,false,1,2);
+    await engine.decodeStreamingVideo([new Uint8Array([2])],[1],30,true,1,2);
+    expect(av.ff_init_decoder).toHaveBeenCalledOnce();
+    expect(av.ff_decode_multi).toHaveBeenNthCalledWith(1,22,33,44,expect.any(Array),false);
+    expect(av.ff_decode_multi).toHaveBeenNthCalledWith(2,22,33,44,expect.any(Array),true);
+    expect(av.ff_free_decoder).toHaveBeenCalledOnce();
+  });
+
+  it("defers disposal until an in-flight decode finishes", async () => {
+    let entered!:()=>void,release!:()=>void;const started=new Promise<void>(resolve=>{entered=resolve;}),wait=new Promise<void>(resolve=>{release=resolve;});
+    const av={ff_init_decoder:vi.fn().mockResolvedValue([11,22,33,44]),ff_decode_multi:vi.fn(async()=>{entered();await wait;return [];}),ff_free_decoder:vi.fn().mockResolvedValue(undefined)};
+    const engine=Object.create(PlayerEngine.prototype) as any;Object.assign(engine,{libav:av,videoCodecId:2,durationValue:10});
+    const decoding=engine.decodeStreamingVideo([new Uint8Array([1])],[0],30,false,1,2);await started;
+    engine.invalidateStreamingVideoDecoder();expect(av.ff_free_decoder).not.toHaveBeenCalled();
+    release();await decoding;expect(av.ff_free_decoder).toHaveBeenCalledOnce();
+  });
+});
+
 describe("selectTimecodeTrack unresolved package fallback", () => {
   it("uses KLV order and excludes invalid rates while package parsing is unsupported",()=>{
     const invalid={startFrame:0,roundedTimecodeBase:25,dropFrame:false,editRateNumerator:0,editRateDenominator:1,packageKind:"material" as const,packageReferenceResolved:true};
@@ -249,6 +271,15 @@ describe("PlayerEngine streaming mode",()=>{
     h.engine.fillStreaming=vi.fn(async()=>{calls++;release.open();await release.wait;h.engine.frames=[{frame:{width:2,height:2},time:5}];h.engine.queuedThroughFrame=50;return true;});
     h.engine.requestFill(0);h.engine.requestFill(0);await release.entered;expect(calls).toBe(1);release.release();await Promise.resolve();await Promise.resolve();
     expect(h.engine.fillStreaming).toHaveBeenCalledTimes(1);
+  });
+
+  it("continues at the next edit unit without rereading GOP preroll",async()=>{
+    const h=streamingPlaybackHarness(),readRange=vi.fn().mockResolvedValue([{kind:"video",editUnit:90,data:new Uint8Array([1])}]);
+    h.engine.durationValue=10;h.engine.queuedThroughFrame=89;h.engine.dependencies={readRange};h.engine.streamingVideoDecoder={av:h.engine.libav,codecId:2,ctx:1,pkt:2,frame:3,loadGeneration:1,seekGeneration:1,busy:false,disposeRequested:false,disposed:false};
+    h.engine.decodeStreamingVideo=vi.fn().mockResolvedValue([]);
+    await h.engine.fillStreaming(90,new AbortController().signal,1,1);
+    expect(readRange).toHaveBeenCalledWith(h.engine.reader,h.engine.essenceIndex,expect.objectContaining({startFrame:90,endFrame:99,kinds:["video"]}));
+    expect(h.engine.decodeStreamingVideo).toHaveBeenCalledWith(expect.any(Array),[90],10,true,1,1);
   });
 
   it("evicts played frames according to retainBehindSeconds without growing the queue",()=>{
