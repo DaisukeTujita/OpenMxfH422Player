@@ -26,6 +26,27 @@ describe("parseMxfMetadata", () => {
     expect(parsed.timecodes[0]).toEqual({ startFrame: 1_080_000, roundedTimecodeBase: 30, dropFrame: true, editRateNumerator: 30000, editRateDenominator: 1001, durationFrames: 900, source: "mxf" });
   });
 
+  it("uses display dimensions for a 544-line separate-fields XDCAM descriptor", () => {
+    const descriptor = klv(metadataKey, concat(
+      field(0x3203, be32(1920)), field(0x3202, be32(544)),
+      field(0x3205, be32(1920)), field(0x3204, be32(1080)),
+      field(0x3209, be32(1920)), field(0x3208, be32(1080)), field(0x320c, bytes(1)),
+    ));
+    expect(parseMxfMetadata(descriptor).mediaInfo.video).toMatchObject({
+      width: 1920, height: 1080, storedWidth: 1920, storedHeight: 544,
+      sampledWidth: 1920, sampledHeight: 1080, displayWidth: 1920, displayHeight: 1080, frameLayout: 1,
+    });
+  });
+
+  it("normalizes a separate-fields 1920x544 descriptor when sampled and display dimensions are absent", () => {
+    const descriptor = klv(metadataKey, concat(
+      field(0x3203, be32(1920)), field(0x3202, be32(544)), field(0x320c, bytes(1)),
+    ));
+    expect(parseMxfMetadata(descriptor).mediaInfo.video).toMatchObject({
+      width: 1920, height: 1080, storedWidth: 1920, storedHeight: 544, frameLayout: 1,
+    });
+  });
+
   it("keeps unavailable metadata undefined and accepts files without a Timecode Track", () => {
     const parsed = parseMxfMetadata(klv(metadataKey, field(0x3203, be32(1920))));
     expect(parsed.mediaInfo.video?.width).toBe(1920);
