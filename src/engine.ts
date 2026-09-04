@@ -190,6 +190,7 @@ export class PlayerEngine {
   private async decodeStreamingVideo(chunks:Uint8Array[],mediaFrames:number[],frameRate:number,flush:boolean,loadGeneration:number,seekGeneration:number):Promise<RenderFrame[]> {
     const av=this.libav!;let state=this.streamingVideoDecoder;
     if(!this.hasStreamingVideoDecoder(loadGeneration,seekGeneration)){if(state)this.invalidateStreamingVideoDecoder();const [,ctx,pkt,frame]=await av.ff_init_decoder(this.videoCodecId);state={av,codecId:this.videoCodecId,ctx,pkt,frame,loadGeneration,seekGeneration,busy:false,disposeRequested:false,disposed:false};this.streamingVideoDecoder=state;}
+    if(!state)throw new Error("Failed to initialize the streaming MPEG-2 decoder");
     state.busy=true;let failure:unknown;const frames:RenderFrame[]=[];
     try {
       const rateScale=Number.isInteger(frameRate)?1:1001,rateDenominator=Math.round(frameRate*rateScale);
