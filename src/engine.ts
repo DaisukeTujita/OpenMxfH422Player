@@ -160,7 +160,7 @@ export class PlayerEngine {
       this.callbacks.mediaInfo?.(metadata.mediaInfo);this.callbacks.timecode?.(timecodeInfo ? timecodeAtSeconds(timecodeInfo,0) : null);
       this.callbacks.ready({width:first.frame.width,height:first.frame.height,frameRate:XDCAM_FRAME_RATE,duration,audioSampleRate:48000,audioChannels:audio.length?2:0});
       this.setStatus("ready");
-    } catch (e) { const error=e instanceof Error?e:new Error(String(e)); if(error.name!=="AbortError"&&current()){this.publishDiagnostics();console.error("[H422Player] load:failed", { generation, mode:this.mode, stageStatus:this.status, error, diagnostics:this.getDiagnostics() });} if(localReader)this.releaseReader(localReader); if(error.name==="AbortError"||!current())return; this.setStatus("error"); this.callbacks.error(error); throw error; }
+    } catch (e) { const error=e instanceof Error?e:new Error(String(e));this.invalidateStreamingVideoDecoder(); if(error.name!=="AbortError"&&current()){this.publishDiagnostics();console.error("[H422Player] load:failed", { generation, mode:this.mode, stageStatus:this.status, error, diagnostics:this.getDiagnostics() });} if(localReader)this.releaseReader(localReader); if(error.name==="AbortError"||!current())return; this.setStatus("error"); this.callbacks.error(error); throw error; }
   }
   private async fillStreaming(targetFrame:number,signal:AbortSignal,loadGeneration:number,seekGeneration=this.seekGeneration,decodeStartFrame?:number):Promise<boolean>{
     if(!this.reader||!this.essenceIndex||!this.libav)return false;
