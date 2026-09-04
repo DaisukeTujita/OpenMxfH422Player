@@ -1,6 +1,6 @@
 const VERTEX = `attribute vec2 p; attribute vec2 t; varying vec2 uv; void main(){gl_Position=vec4(p,0.,1.);uv=t;}`;
 const RGBA_FRAGMENT = `precision mediump float; varying vec2 uv; uniform sampler2D tex; void main(){gl_FragColor=texture2D(tex,uv);}`;
-const YUV_FRAGMENT = `precision mediump float; varying vec2 uv; uniform sampler2D texY; uniform sampler2D texU; uniform sampler2D texV; void main(){float y=1.16438356*(texture2D(texY,uv).r-0.0625);float u=texture2D(texU,uv).r-0.5;float v=texture2D(texV,uv).r-0.5;gl_FragColor=vec4(y+1.79274107*v,y-0.21324861*u-0.53290933*v,y+2.11240179*u,1.0);}`;
+const YUV_FRAGMENT = `precision mediump float; varying vec2 uv; uniform sampler2D texY; uniform sampler2D texU; uniform sampler2D texV; void main(){float y=1.1640625*(texture2D(texY,uv).r-0.0625);float u=texture2D(texU,uv).r-0.5;float v=texture2D(texV,uv).r-0.5;gl_FragColor=vec4(y+1.59765625*v,y-0.390625*u-0.8125*v,y+2.015625*u,1.0);}`;
 
 export interface Yuv422Frame {
   width: number;
