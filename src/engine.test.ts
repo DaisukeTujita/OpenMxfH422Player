@@ -244,7 +244,7 @@ describe("PlayerEngine streaming mode",()=>{
       parseMetadata:async()=>({mediaInfo:{operationalPattern:"OP1a",essenceContainer:"060e2b34",video:{width:1920,height:1080},durationFrames:300,timecodeTrackCount:0,indexTableCount:0,indexEntryCount:0},timecodes:[],indexTables:[],partitions:[{offset:0n,kind:"header"}]}),
       indexEssence:async()=>({frameRate:30,partitions:[],packets:[{kind:"video",editUnit:0}]}),readRange,readWhole,parse:vi.fn(),loadLibav:async()=>({libavjs_with_swscale:async()=>1})
     }});
-    engine.decodeVideo=async()=>[{frame:{width:2,height:2},time:0}];
+    engine.decodeStreamingVideo=async()=>[{frame:{width:2,height:2},time:0,mediaFrame:0}];
     engine.requestFill=vi.fn();engine.requestAudioFill=vi.fn();
     await engine.load(new Blob([new Uint8Array(1000)]));
     expect(readWhole).not.toHaveBeenCalled();
@@ -276,7 +276,7 @@ describe("PlayerEngine streaming mode",()=>{
   it("continues at the next edit unit without rereading GOP preroll",async()=>{
     const h=streamingPlaybackHarness(),readRange=vi.fn().mockResolvedValue([{kind:"video",editUnit:90,data:new Uint8Array([1])}]);
     h.engine.durationValue=10;h.engine.queuedThroughFrame=89;h.engine.dependencies={readRange};h.engine.streamingVideoDecoder={av:h.engine.libav,codecId:2,ctx:1,pkt:2,frame:3,loadGeneration:1,seekGeneration:1,busy:false,disposeRequested:false,disposed:false};
-    h.engine.decodeStreamingVideo=vi.fn().mockResolvedValue([]);
+    h.engine.decodeStreamingVideo=vi.fn().mockResolvedValue([]);h.engine.publishDiagnostics=vi.fn();
     await h.engine.fillStreaming(90,new AbortController().signal,1,1);
     expect(readRange).toHaveBeenCalledWith(h.engine.reader,h.engine.essenceIndex,expect.objectContaining({startFrame:90,endFrame:99,kinds:["video"]}));
     expect(h.engine.decodeStreamingVideo).toHaveBeenCalledWith(expect.any(Array),[90],10,true,1,1);
@@ -307,7 +307,7 @@ describe("PlayerEngine streaming mode",()=>{
     h.engine.timecodeInfo={startFrame:0,roundedTimecodeBase:30,dropFrame:false,editRateNumerator:30,editRateDenominator:1};h.engine.reader={destroy:vi.fn(),getStats:()=>({bytesLoaded:123n})};
     const packets=Array.from({length:41},(_,i)=>({kind:"video",editUnit:90+i,data:new Uint8Array([i]),valueOffset:0n,valueLength:1n,offset:0n,trackNumber:1,presentationTime:(90+i)/30}));
     h.engine.dependencies={readRange:vi.fn(async(_reader:any,_index:any,options:any)=>{expect(options).toMatchObject({startFrame:90,prerollFrames:0});expect(options.endFrame).toBeGreaterThanOrEqual(100);return packets.filter(packet=>packet.editUnit<=options.endFrame);})};
-    const decodedInputs:number[][]=[];h.engine.decodeVideo=vi.fn(async(_chunks:any,_codec:any,_av:any,mediaFrames:number[])=>{decodedInputs.push(mediaFrames);return mediaFrames.map(mediaFrame=>({frame:{width:2,height:2},time:mediaFrame/30,mediaFrame}));});
+    const decodedInputs:number[][]=[];h.engine.decodeStreamingVideo=vi.fn(async(_chunks:any,mediaFrames:number[])=>{decodedInputs.push(mediaFrames);return mediaFrames.map(mediaFrame=>({frame:{width:2,height:2},time:mediaFrame/30,mediaFrame}));});
     h.engine.fillStreamingAudio=vi.fn(async(mediaTime:number)=>{expect(mediaTime).toBe(100/30);return true;});
     await h.engine.seekTimecode("00:00:03:10");
     expect(decodedInputs[0][0]).toBe(90);expect(decodedInputs[0]).toContain(100);expect(h.engine.frames[0].mediaFrame).toBe(100);expect(h.engine.frames.some((frame:any)=>frame.mediaFrame<100)).toBe(false);
