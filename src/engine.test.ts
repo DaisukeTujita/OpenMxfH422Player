@@ -276,10 +276,11 @@ describe("PlayerEngine streaming mode",()=>{
   it("continues at the next edit unit without rereading GOP preroll",async()=>{
     const h=streamingPlaybackHarness(),readRange=vi.fn().mockResolvedValue([{kind:"video",editUnit:90,data:new Uint8Array([1])}]);
     h.engine.durationValue=10;h.engine.queuedThroughFrame=89;h.engine.dependencies={readRange};h.engine.streamingVideoDecoder={av:h.engine.libav,codecId:2,ctx:1,pkt:2,frame:3,loadGeneration:1,seekGeneration:1,busy:false,disposeRequested:false,disposed:false};
-    h.engine.decodeStreamingVideo=vi.fn().mockResolvedValue([]);h.engine.publishDiagnostics=vi.fn();
+    h.engine.decodeStreamingVideo=vi.fn().mockResolvedValue([{frame:{width:2,height:2},time:8.9,mediaFrame:89},{frame:{width:2,height:2},time:9,mediaFrame:90}]);h.engine.publishDiagnostics=vi.fn();
     await h.engine.fillStreaming(90,new AbortController().signal,1,1);
     expect(readRange).toHaveBeenCalledWith(h.engine.reader,h.engine.essenceIndex,expect.objectContaining({startFrame:90,endFrame:99,kinds:["video"]}));
     expect(h.engine.decodeStreamingVideo).toHaveBeenCalledWith(expect.any(Array),[90],10,true,1,1);
+    expect(h.engine.frames.map((frame:any)=>frame.mediaFrame)).toEqual([89,90]);
   });
 
   it("evicts played frames according to retainBehindSeconds without growing the queue",()=>{
