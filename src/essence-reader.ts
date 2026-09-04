@@ -59,7 +59,9 @@ export async function indexMxfEssence(reader: RandomAccessReader, options: { par
     if (kind) {
       const owner = partitionFor(offset, partitions);
       const trackNumber = header.key[13] * 0x10000 + header.key[14] * 0x100 + header.key[15];
-      const streamKey = `${owner?.bodySid ?? "?"}:${kind}:${trackNumber}`;
+      // A single essence track can continue through multiple Body Partitions.
+      // Its edit-unit timeline must not restart when the owning partition changes.
+      const streamKey = `${kind}:${trackNumber}`;
       const editUnit = counts.get(streamKey) ?? 0; counts.set(streamKey, editUnit + 1);
       // MXF Index Tables describe picture edit units here. Never attach an ambiguous
       // table (or a picture table to sound); missing data deliberately uses preroll.
