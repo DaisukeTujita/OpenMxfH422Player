@@ -213,7 +213,7 @@ describe("PlayerEngine stale load suppression",()=>{
 
 describe("PlayerEngine streaming mode",()=>{
   afterEach(()=>{vi.unstubAllGlobals();vi.restoreAllMocks();});
-  it("keeps the reader and never calls readWhole while loading only the initial range",async()=>{
+  it("keeps the reader, avoids readWhole, and starts background prefetch after the initial range",async()=>{
     const readWhole=vi.fn(),destroy=vi.fn(),readRange=vi.fn().mockResolvedValue([{kind:"video",data:new Uint8Array([0,0,1,0xb3]),editUnit:0}]);
     const callbacks={status:vi.fn(),ready:vi.fn(),time:vi.fn(),error:vi.fn(),mediaInfo:vi.fn(),timecode:vi.fn(),diagnostics:vi.fn()};
     const engine=Object.create(PlayerEngine.prototype) as any;
@@ -223,11 +223,14 @@ describe("PlayerEngine streaming mode",()=>{
       indexEssence:async()=>({frameRate:30,partitions:[],packets:[{kind:"video",editUnit:0}]}),readRange,readWhole,parse:vi.fn(),loadLibav:async()=>({libavjs_with_swscale:async()=>1})
     }});
     engine.decodeVideo=async()=>[{frame:{width:2,height:2},time:0}];
+    engine.requestFill=vi.fn();engine.requestAudioFill=vi.fn();
     await engine.load(new Blob([new Uint8Array(1000)]));
     expect(readWhole).not.toHaveBeenCalled();
     expect(readRange).toHaveBeenCalledWith(expect.anything(),expect.anything(),expect.objectContaining({startFrame:0,endFrame:89,maxReadSize:1024,kinds:["video"]}));
     expect(destroy).not.toHaveBeenCalled();
     expect(callbacks.ready).toHaveBeenCalledOnce();
+    expect(engine.requestFill).toHaveBeenCalledWith(0,true);
+    expect(engine.requestAudioFill).toHaveBeenCalledWith(0);
     expect(callbacks.timecode).toHaveBeenCalledWith(null);
     expect(callbacks.error).not.toHaveBeenCalled();
     engine.destroy();
