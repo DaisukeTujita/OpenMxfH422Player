@@ -97,9 +97,9 @@ export function parseMxfMetadataKlv(result: MxfMetadataResult, key: Uint8Array, 
       const rawDisplayWidth = displayWidth ? u32(displayWidth) : previous?.displayWidth, rawDisplayHeight = displayHeight ? u32(displayHeight) : previous?.displayHeight;
       const layout = frameLayout?.[0] ?? previous?.frameLayout, width = rawDisplayWidth ?? rawSampledWidth ?? rawStoredWidth ?? previous?.width;
       let height = rawDisplayHeight ?? rawSampledHeight ?? rawStoredHeight ?? previous?.height;
-      // XDCAM 1080i may store one 544-line field (540 picture lines plus blanking)
+      // XDCAM 1080i may expose a 540-line display field or a 544-line stored field
       // while FrameLayout=SeparateFields describes the complete 1080-line picture.
-      if (layout === 1 && width === 1920 && height === 544) height = 1080;
+      if (layout === 1 && width === 1920 && (height === 540 || height === 544)) height = 1080;
       result.mediaInfo.video = {
         ...result.mediaInfo.video, width, height,
         storedWidth: rawStoredWidth, storedHeight: rawStoredHeight,

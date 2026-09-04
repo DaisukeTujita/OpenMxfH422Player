@@ -38,6 +38,16 @@ describe("parseMxfMetadata", () => {
     });
   });
 
+  it("normalizes the real-file 540-line display field to a 1080-line picture", () => {
+    const descriptor = klv(metadataKey, concat(
+      field(0x3203, be32(1920)), field(0x3202, be32(544)),
+      field(0x3209, be32(1920)), field(0x3208, be32(540)), field(0x320c, bytes(1)),
+    ));
+    expect(parseMxfMetadata(descriptor).mediaInfo.video).toMatchObject({
+      width: 1920, height: 1080, storedHeight: 544, displayHeight: 540, frameLayout: 1,
+    });
+  });
+
   it("normalizes a separate-fields 1920x544 descriptor when sampled and display dimensions are absent", () => {
     const descriptor = klv(metadataKey, concat(
       field(0x3203, be32(1920)), field(0x3202, be32(544)), field(0x320c, bytes(1)),
