@@ -8,8 +8,9 @@ const be64 = (value: bigint) => {
 };
 const rational = (numerator: number, denominator: number) => concat(be32(numerator), be32(denominator));
 const concat = (...parts: Uint8Array[]) => { const result = new Uint8Array(parts.reduce((sum, part) => sum + part.length, 0)); let at = 0; for (const part of parts) { result.set(part, at); at += part.length; } return result; };
-const field = (tag: number, value: Uint8Array) => concat(bytes(tag >>> 8, tag, value.length), value);
-const klv = (keyHex: string, value: Uint8Array) => concat(bytes(...(keyHex.match(/../g) ?? []).map(value => Number.parseInt(value, 16))), bytes(value.length), value);
+const field = (tag: number, value: Uint8Array) => concat(bytes(tag >>> 8, tag, value.length >>> 8, value.length), value);
+const berLength = (length: number) => length < 0x80 ? bytes(length) : length <= 0xff ? bytes(0x81, length) : bytes(0x82, length >>> 8, length);
+const klv = (keyHex: string, value: Uint8Array) => concat(bytes(...(keyHex.match(/../g) ?? []).map(value => Number.parseInt(value, 16))), berLength(value.length), value);
 const metadataKey = "060e2b34025301010d01010101012f00";
 
 describe("parseMxfMetadata", () => {
