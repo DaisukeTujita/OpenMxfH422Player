@@ -178,7 +178,7 @@ export class PlayerEngine {
     const decoded=await this.decodeStreamingVideo(video.map(packet=>packet.data),video.map(packet=>packet.editUnit),fps,finalChunk,loadGeneration,seekGeneration);
     if(!current())return false;
     const positioned=decoded.map((item,index)=>item.mediaFrame===undefined?{...item,mediaFrame:video[index]?.editUnit??decodeStart+index,time:(video[index]?.editUnit??decodeStart+index)/fps}:item);
-    const wanted=positioned.filter(item=>item.mediaFrame>=target&&item.mediaFrame<=end);
+    const wanted=positioned.filter(item=>(canContinue||item.mediaFrame>=target)&&item.mediaFrame<=end);
     const existing=new Set(this.frames.map(frame=>frame.mediaFrame));
     for(const item of wanted)if(!existing.has(item.mediaFrame))this.frames.push(item);
     this.frames.sort((a,b)=>a.mediaFrame-b.mediaFrame);this.queuedThroughFrame=Math.max(this.queuedThroughFrame,end);this.publishDiagnostics();return true;
