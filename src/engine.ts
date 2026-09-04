@@ -5,14 +5,14 @@ import { pcmS24beToFloat32, XDCAM_FRAME_RATE, yuv422pToRgba } from "./media";
 import { timecodeAtSeconds, timecodeToMediaFrame, type MxfTimecodeInfo } from "./timecode";
 import { findSeekPoint } from "./mxf-index";
 import type { PlayerInfo, PlayerStatus } from "./types";
-import { WebGlRenderer } from "./webgl";
+import { WebGlRenderer, type Yuv422Frame } from "./webgl";
 import { essenceDecodeStart, indexMxfEssence, readEssenceRange, type EssenceIndex } from "./essence-reader";
-import type { PlaybackMode, PlayerDiagnostics } from "./types";
+import type { PlaybackMode, PlayerDiagnostics, VideoRenderMode } from "./types";
 
 interface Callbacks { status(s: PlayerStatus): void; ready(i: PlayerInfo): void; time(t: number): void; error(e: Error): void; mediaInfo?(i: import("./mxf-metadata").MxfMediaInfo): void; timecode?(value: string | null): void; seeking?(value: boolean): void; buffering?(value:boolean):void; diagnostics?(value:PlayerDiagnostics):void }
 type LibAV = Record<string, any>;
 type DecodedFrame = { data?: Uint8Array; layout?: Array<{offset:number; stride:number}>; width: number; height: number; format?: number; pts?: number };
-type RenderFrame = {frame: ImageData; time: number; mediaFrame: number};
+type RenderFrame = {frame: ImageData|Yuv422Frame; time: number; mediaFrame: number};
 type StreamingAudioChunk = {mediaStartTime:number;mediaEndTime:number;buffer:AudioBuffer;generation:number;scheduled:boolean};
 type ScheduledAudio = {mediaStartTime:number;mediaEndTime:number;contextStartTime:number;sourceNode:AudioBufferSourceNode;generation:number;started:boolean;ended:boolean};
 type StreamingVideoDecoder = {av:LibAV;codecId:number;ctx:number;pkt:number;frame:number;loadGeneration:number;seekGeneration:number;busy:boolean;disposeRequested:boolean;disposed:boolean};
@@ -30,7 +30,7 @@ const defaultDependencies: PlayerEngineDependencies = {
   readWhole:async blob=>new Uint8Array(await blob.slice(0,blob.size).arrayBuffer()), parse:parseMxf, loadLibav:loadCustomLibAV, indexEssence:indexMxfEssence, readRange:readEssenceRange,
 };
 
-export interface PlayerEngineOptions { mode?: PlaybackMode; videoAheadSeconds?:number; retainBehindSeconds?:number; refillThresholdSeconds?:number; chunkSeconds?:number; maxReadSize?:number }
+export interface PlayerEngineOptions { mode?: PlaybackMode; videoRenderMode?:VideoRenderMode; videoAheadSeconds?:number; retainBehindSeconds?:number; refillThresholdSeconds?:number; chunkSeconds?:number; maxReadSize?:number }
 
 type TimecodeLogger = Pick<Console, "debug" | "info" | "warn">;
 
@@ -86,18 +86,19 @@ export class PlayerEngine {
   private seekController?: AbortController; private seekGeneration=0;
   private requestedTimecode:string|null=null; private requestedFrame:number|null=null; private actualDisplayedFrame:number|null=null; private seekStartFrame:number|null=null; private prerollFrames=0; private seekSource:PlayerDiagnostics["seekSource"]=null; private seekReadBytes=0; private seekElapsedMs:number|null=null; private timecodeSelectionReason="Timecode Trackなし";
   private reader?: RandomAccessReader & {destroy():void}; private essenceIndex?:EssenceIndex; private indexTables:import("./mxf-index").MxfIndexTable[]=[]; private mode:PlaybackMode;
-  private fileSize=0; private filling?:Promise<void>; private fillController?:AbortController; private queuedThroughFrame=-1; private videoCodecId=2; private streamingVideoDecoder?:StreamingVideoDecoder;
+  private fileSize=0; private videoRenderMode:VideoRenderMode; private videoDecodedFrames=0; private videoDecodeMs=0; private videoColorConvertMs=0; private videoUploadMs=0; private filling?:Promise<void>; private fillController?:AbortController; private queuedThroughFrame=-1; private videoCodecId=2; private streamingVideoDecoder?:StreamingVideoDecoder;
   private buffering=false; private resumeAfterBuffer=false;
   private streamingAudioSupported=false; private audioFormatBasis:PlayerDiagnostics["audioFormatBasis"]=null; private selectedAudioTrackNumber?:number; private audioSampleRate?:number; private audioChannels?:number;
   private audioChunks:StreamingAudioChunk[]=[]; private scheduledAudio:ScheduledAudio[]=[]; private audioBytesLoaded=0; private audioMediaAnchor?:number; private audioContextAnchor?:number; private audioQueuedThroughTime=0; private audioExhausted=false; private lastAudioTime=0; private audioFillController?:AbortController; private audioFilling?:Promise<void>;
   private destroyedReaders?:WeakSet<object>;
   private readonly videoAheadSeconds:number; private readonly retainBehindSeconds:number; private readonly refillThresholdSeconds:number; private readonly chunkSeconds:number; private readonly maxReadSize:number;
   private readonly dependencies: PlayerEngineDependencies;
-  constructor(canvas: HTMLCanvasElement, private callbacks: Callbacks, private muted=false, private libavBase="/libav", dependencies: Partial<PlayerEngineDependencies>={}, options:PlayerEngineOptions={}) { this.renderer=new WebGlRenderer(canvas);this.dependencies={...defaultDependencies,...dependencies};this.mode=options.mode??"legacy";this.videoAheadSeconds=options.videoAheadSeconds??4;this.retainBehindSeconds=options.retainBehindSeconds??1;this.refillThresholdSeconds=options.refillThresholdSeconds??2;this.chunkSeconds=options.chunkSeconds??3;this.maxReadSize=options.maxReadSize??4*1024*1024; }
+  constructor(canvas: HTMLCanvasElement, private callbacks: Callbacks, private muted=false, private libavBase="/libav", dependencies: Partial<PlayerEngineDependencies>={}, options:PlayerEngineOptions={}) { this.renderer=new WebGlRenderer(canvas);this.dependencies={...defaultDependencies,...dependencies};this.mode=options.mode??"legacy";this.videoRenderMode=options.videoRenderMode??"rgba";this.videoAheadSeconds=options.videoAheadSeconds??4;this.retainBehindSeconds=options.retainBehindSeconds??1;this.refillThresholdSeconds=options.refillThresholdSeconds??2;this.chunkSeconds=options.chunkSeconds??3;this.maxReadSize=options.maxReadSize??4*1024*1024; }
   get currentTime(): number { return this.status === "playing" ? Math.min(this.durationValue,(performance.now()-this.startedAt)/1000) : this.pausedAt; }
   get duration(): number { return this.durationValue; }
   private setStatus(s: PlayerStatus) { this.status=s; this.callbacks.status(s); }
-  getDiagnostics():PlayerDiagnostics { const stats=(this.reader as any)?.getStats?.()??{};const active=this.audio&&this.scheduledAudio.find(range=>range.contextStartTime<=this.audio!.currentTime&&range.contextStartTime+range.mediaEndTime-range.mediaStartTime>=this.audio!.currentTime);const audioTime=active&&this.audio?active.mediaStartTime+this.audio.currentTime-active.contextStartTime:null;return {mode:this.mode,fileSize:this.fileSize,bytesLoaded:Number(stats.bytesLoaded??0),underlyingReadCount:stats.underlyingReadCount??0,cacheBytes:stats.cachedBytes??0,videoQueueFrames:this.frames.length,videoQueueStart:this.frames[0]?.time??null,videoQueueEnd:this.frames.at(-1)?.time??null,scheduledAudioRanges:this.mode==="streaming"?this.scheduledAudio.length:(this.audioSource?1:0),loadGeneration:this.loadGeneration,seekGeneration:this.seekGeneration,streamingAudioSupported:this.streamingAudioSupported,selectedAudioTrackNumber:this.selectedAudioTrackNumber??null,audioSampleRate:this.audioSampleRate??null,audioChannels:this.audioChannels??null,audioQueueStart:this.audioChunks?.[0]?.mediaStartTime??null,audioQueueEnd:this.audioChunks?.at(-1)?.mediaEndTime??null,audioVideoDriftMs:audioTime===null?null:(audioTime-this.currentTime)*1000,audioBytesLoaded:this.audioBytesLoaded,audioQueuedThroughTime:this.audioQueuedThroughTime,audioExhausted:this.audioExhausted,lastPlayableAudioTime:this.streamingAudioSupported?this.lastAudioTime:null,audioFormatBasis:this.audioFormatBasis,requestedTimecode:this.requestedTimecode,requestedFrame:this.requestedFrame,actualDisplayedFrame:this.actualDisplayedFrame,seekStartFrame:this.seekStartFrame,prerollFrames:this.prerollFrames,seekSource:this.seekSource,seekReadBytes:this.seekReadBytes,seekElapsedMs:this.seekElapsedMs,selectedTimecodeTrack:this.timecodeInfo?"unresolved":null,timecodeSelectionReason:this.timecodeSelectionReason}; }
+  private drawFrame(frame:ImageData|Yuv422Frame):void { const started=performance.now();this.renderer.draw(frame,frame.width,frame.height);this.videoUploadMs+=(performance.now()-started); }
+  getDiagnostics():PlayerDiagnostics { const stats=(this.reader as any)?.getStats?.()??{};const active=this.audio&&this.scheduledAudio.find(range=>range.contextStartTime<=this.audio!.currentTime&&range.contextStartTime+range.mediaEndTime-range.mediaStartTime>=this.audio!.currentTime);const audioTime=active&&this.audio?active.mediaStartTime+this.audio.currentTime-active.contextStartTime:null;return {mode:this.mode,videoRenderMode:this.videoRenderMode,fileSize:this.fileSize,bytesLoaded:Number(stats.bytesLoaded??0),underlyingReadCount:stats.underlyingReadCount??0,cacheBytes:stats.cachedBytes??0,videoQueueFrames:this.frames.length,videoQueueStart:this.frames[0]?.time??null,videoQueueEnd:this.frames.at(-1)?.time??null,scheduledAudioRanges:this.mode==="streaming"?this.scheduledAudio.length:(this.audioSource?1:0),loadGeneration:this.loadGeneration,seekGeneration:this.seekGeneration,streamingAudioSupported:this.streamingAudioSupported,selectedAudioTrackNumber:this.selectedAudioTrackNumber??null,audioSampleRate:this.audioSampleRate??null,audioChannels:this.audioChannels??null,audioQueueStart:this.audioChunks?.[0]?.mediaStartTime??null,audioQueueEnd:this.audioChunks?.at(-1)?.mediaEndTime??null,audioVideoDriftMs:audioTime===null?null:(audioTime-this.currentTime)*1000,audioBytesLoaded:this.audioBytesLoaded,audioQueuedThroughTime:this.audioQueuedThroughTime,audioExhausted:this.audioExhausted,lastPlayableAudioTime:this.streamingAudioSupported?this.lastAudioTime:null,audioFormatBasis:this.audioFormatBasis,requestedTimecode:this.requestedTimecode,requestedFrame:this.requestedFrame,actualDisplayedFrame:this.actualDisplayedFrame,seekStartFrame:this.seekStartFrame,prerollFrames:this.prerollFrames,seekSource:this.seekSource,seekReadBytes:this.seekReadBytes,seekElapsedMs:this.seekElapsedMs,selectedTimecodeTrack:this.timecodeInfo?"unresolved":null,timecodeSelectionReason:this.timecodeSelectionReason,videoDecodedFrames:this.videoDecodedFrames,videoDecodeMs:this.videoDecodeMs,videoColorConvertMs:this.videoColorConvertMs,videoUploadMs:this.videoUploadMs}; }
   private publishDiagnostics(){this.callbacks.diagnostics?.(this.getDiagnostics());}
   private destroyReader(reader?:RandomAccessReader & {destroy():void}){if(!reader)return;const destroyed=this.destroyedReaders??=new WeakSet<object>();if(destroyed.has(reader))return;destroyed.add(reader);reader.destroy();}
   private releaseReader(expected?:RandomAccessReader & {destroy():void}){const reader=expected??this.reader;if(!reader)return;if(this.reader===reader)this.reader=undefined;this.destroyReader(reader);}
@@ -105,10 +106,10 @@ export class PlayerEngine {
   private setBuffering(value:boolean){if(this.buffering===value)return;this.buffering=value;this.callbacks.buffering?.(value);}
   private streamExhausted(){const videos=this.essenceIndex?.packets.filter(packet=>packet.kind==="video");const last=videos?.at(-1);return Boolean(last&&this.queuedThroughFrame>=last.editUnit);}
   private streamAtEnd(t:number){if(!this.streamExhausted()||!this.essenceIndex)return false;const lastTime=this.frames.at(-1)?.time??0;return t>=Math.min(lastTime,this.durationValue-1/this.essenceIndex.frameRate);}
-  private finishEnded(){if(this.status==="ended")return;const last=this.frames.at(-1);if(last)this.renderer.draw(last.frame,last.frame.width,last.frame.height);this.pausedAt=this.durationValue;this.emitTime(this.durationValue);cancelAnimationFrame(this.raf);this.raf=0;this.resumeAfterBuffer=false;this.setBuffering(false);this.stopAudioSource();void this.audio?.suspend();this.setStatus("ended");}
+  private finishEnded(){if(this.status==="ended")return;const last=this.frames.at(-1);if(last)this.drawFrame(last.frame);this.pausedAt=this.durationValue;this.emitTime(this.durationValue);cancelAnimationFrame(this.raf);this.raf=0;this.resumeAfterBuffer=false;this.setBuffering(false);this.stopAudioSource();void this.audio?.suspend();this.setStatus("ended");}
   private failStreaming(error:Error){this.abortFill();this.invalidateStreamingVideoDecoder();cancelAnimationFrame(this.raf);this.raf=0;this.resumeAfterBuffer=false;this.setBuffering(false);this.stopAudioSource();void this.audio?.suspend();this.frames=[];this.releaseReader();this.setStatus("error");this.callbacks.error(error);}
   async load(source: File|Blob|string): Promise<void> {
-    this.stopAudioSource();this.invalidateStreamingVideoDecoder();const previousAudio=this.audio;this.audio=undefined;if(previousAudio)await previousAudio.close();this.audioBuffer=undefined;this.streamingAudioSupported=false;this.audioFormatBasis=null;this.selectedAudioTrackNumber=undefined;this.audioSampleRate=undefined;this.audioChannels=undefined;this.audioChunks=[];this.scheduledAudio=[];this.audioBytesLoaded=0;this.audioQueuedThroughTime=0;this.audioExhausted=false;this.lastAudioTime=0;this.audioMediaAnchor=undefined;this.audioContextAnchor=undefined; this.abortFill();this.setBuffering(false); this.releaseReader(); this.seekController?.abort(); this.seekGeneration++;
+    this.videoDecodedFrames=0;this.videoDecodeMs=0;this.videoColorConvertMs=0;this.videoUploadMs=0;this.stopAudioSource();this.invalidateStreamingVideoDecoder();const previousAudio=this.audio;this.audio=undefined;if(previousAudio)await previousAudio.close();this.audioBuffer=undefined;this.streamingAudioSupported=false;this.audioFormatBasis=null;this.selectedAudioTrackNumber=undefined;this.audioSampleRate=undefined;this.audioChannels=undefined;this.audioChunks=[];this.scheduledAudio=[];this.audioBytesLoaded=0;this.audioQueuedThroughTime=0;this.audioExhausted=false;this.lastAudioTime=0;this.audioMediaAnchor=undefined;this.audioContextAnchor=undefined; this.abortFill();this.setBuffering(false); this.releaseReader(); this.seekController?.abort(); this.seekGeneration++;
     this.loadController?.abort(); const controller=new AbortController(); this.loadController=controller; const {signal}=controller, generation=++this.loadGeneration;
     const current=()=>!signal.aborted&&!this.destroyed&&this.loadGeneration===generation;
     this.setStatus("loading");
@@ -139,7 +140,7 @@ export class PlayerEngine {
         this.libav=libav;this.timecodeInfo=timecodeInfo;this.durationValue=(metadata.mediaInfo.durationFrames??this.essenceIndex.packets.filter(p=>p.kind==="video").length)/frameRate;this.frames=[];this.queuedThroughFrame=-1;
         this.configureStreamingAudio(metadata.mediaInfo);
         console.info("[H422Player] streaming:initial-fill:start", { generation }); const initialFill=new AbortController();this.fillController=initialFill;await Promise.all([this.fillStreaming(0,initialFill.signal,generation,this.seekGeneration),this.fillStreamingAudio(0,initialFill.signal,generation,this.seekGeneration)]);if(this.fillController===initialFill)this.fillController=undefined;if(!current())return;const first=this.frames[0];if(!first)throw new Error("The MPEG-2 decoder returned no frames");
-        this.renderer.draw(first.frame,first.frame.width,first.frame.height);this.callbacks.mediaInfo?.(metadata.mediaInfo);this.callbacks.timecode?.(timecodeInfo?timecodeAtSeconds(timecodeInfo,0):null);this.callbacks.ready({width:first.frame.width,height:first.frame.height,frameRate,duration:this.durationValue,audioSampleRate:this.audioSampleRate??48000,audioChannels:this.streamingAudioSupported?this.audioChannels!:0});this.setStatus("ready");this.publishDiagnostics();this.requestFill(0,true);this.requestAudioFill(0);console.info("[H422Player] streaming:ready", { generation, duration:this.durationValue, frames:this.frames.length, diagnostics:this.getDiagnostics() });return;
+        this.drawFrame(first.frame);this.callbacks.mediaInfo?.(metadata.mediaInfo);this.callbacks.timecode?.(timecodeInfo?timecodeAtSeconds(timecodeInfo,0):null);this.callbacks.ready({width:first.frame.width,height:first.frame.height,frameRate,duration:this.durationValue,audioSampleRate:this.audioSampleRate??48000,audioChannels:this.streamingAudioSupported?this.audioChannels!:0});this.setStatus("ready");this.publishDiagnostics();this.requestFill(0,true);this.requestAudioFill(0);console.info("[H422Player] streaming:ready", { generation, duration:this.durationValue, frames:this.frames.length, diagnostics:this.getDiagnostics() });return;
       }
       // Compatibility path intentionally retains contiguous full-file decoding.
       const bytes=await this.dependencies.readWhole(blob);
@@ -156,7 +157,7 @@ export class PlayerEngine {
       const duration=frames.length/XDCAM_FRAME_RATE, first=frames[0]; if (!first) { if(prepared)void prepared.audio.close(); throw new Error("The MPEG-2 decoder returned no frames"); }
       this.libav=libav;this.frames=frames;this.timecodeInfo=timecodeInfo;this.durationValue=duration;
       if(prepared){this.audio=prepared.audio;this.audioBuffer=prepared.audioBuffer;}
-      this.renderer.draw(first.frame,first.frame.width,first.frame.height);
+      this.drawFrame(first.frame);
       this.callbacks.mediaInfo?.(metadata.mediaInfo);this.callbacks.timecode?.(timecodeInfo ? timecodeAtSeconds(timecodeInfo,0) : null);
       this.callbacks.ready({width:first.frame.width,height:first.frame.height,frameRate:XDCAM_FRAME_RATE,duration,audioSampleRate:48000,audioChannels:audio.length?2:0});
       this.setStatus("ready");
@@ -195,9 +196,12 @@ export class PlayerEngine {
     try {
       const rateScale=Number.isInteger(frameRate)?1:1001,rateDenominator=Math.round(frameRate*rateScale);
       const packets=chunks.map((data,i)=>({data,pts:mediaFrames[i]??i,time_base_num:rateScale,time_base_den:rateDenominator}));
+      const decodeStarted=performance.now();
       const decoded=await av.ff_decode_multi(state.ctx,state.pkt,state.frame,packets,flush) as DecodedFrame[];
-      const maxMediaFrame=Math.ceil(this.durationValue*frameRate);
-      for(let i=0;i<decoded.length;i++){const f=decoded[i];if(!f.data)continue;if(f.format!==av.AV_PIX_FMT_YUV422P||!f.layout||f.layout.length<3)throw new Error(`Expected yuv422p planes from MPEG-2 decoder (pixel format ${f.format??"unknown"})`);const plane=(index:number,width:number)=>{const output=new Uint8Array(width*f.height),layout=f.layout![index];for(let row=0;row<f.height;row++)output.set(f.data!.subarray(layout.offset+row*layout.stride,layout.offset+row*layout.stride+width),row*width);return output;};const chromaWidth=Math.ceil(f.width/2),rgba=yuv422pToRgba(plane(0,f.width),plane(1,chromaWidth),plane(2,chromaWidth),f.width,f.height);const decodedPts=f.pts===undefined?Number.NaN:Number(f.pts);const mediaFrame=Number.isSafeInteger(decodedPts)&&decodedPts>=0&&decodedPts<maxMediaFrame?decodedPts:mediaFrames[i]??i;frames.push({frame:new ImageData(new Uint8ClampedArray(rgba),f.width,f.height),time:mediaFrame/frameRate,mediaFrame});}
+      const chunkDecodeMs=performance.now()-decodeStarted;this.videoDecodeMs+=chunkDecodeMs;
+      const maxMediaFrame=Math.ceil(this.durationValue*frameRate);let chunkConvertMs=0;
+      for(let i=0;i<decoded.length;i++){const f=decoded[i];if(!f.data)continue;if(f.format!==av.AV_PIX_FMT_YUV422P||!f.layout||f.layout.length<3)throw new Error(`Expected yuv422p planes from MPEG-2 decoder (pixel format ${f.format??"unknown"})`);const plane=(index:number,width:number)=>{const output=new Uint8Array(width*f.height),layout=f.layout![index];for(let row=0;row<f.height;row++)output.set(f.data!.subarray(layout.offset+row*layout.stride,layout.offset+row*layout.stride+width),row*width);return output;};const chromaWidth=Math.ceil(f.width/2),y=plane(0,f.width),u=plane(1,chromaWidth),v=plane(2,chromaWidth);let renderFrame:ImageData|Yuv422Frame;if(this.videoRenderMode==="yuv-webgl")renderFrame={width:f.width,height:f.height,y,u,v};else{const convertStarted=performance.now(),rgba=yuv422pToRgba(y,u,v,f.width,f.height);chunkConvertMs+=performance.now()-convertStarted;renderFrame=new ImageData(new Uint8ClampedArray(rgba),f.width,f.height);}const decodedPts=f.pts===undefined?Number.NaN:Number(f.pts);const mediaFrame=Number.isSafeInteger(decodedPts)&&decodedPts>=0&&decodedPts<maxMediaFrame?decodedPts:mediaFrames[i]??i;frames.push({frame:renderFrame,time:mediaFrame/frameRate,mediaFrame});}
+      this.videoDecodedFrames+=frames.length;this.videoColorConvertMs+=chunkConvertMs;console.info("[H422Player] video performance",{renderMode:this.videoRenderMode,inputPackets:packets.length,decodedFrames:frames.length,decodeMs:Number(chunkDecodeMs.toFixed(1)),colorConvertMs:Number(chunkConvertMs.toFixed(1)),totalDecodeMs:Number(this.videoDecodeMs.toFixed(1)),totalColorConvertMs:Number(this.videoColorConvertMs.toFixed(1))});
     } catch(error){failure=error;state.disposeRequested=true;if(this.streamingVideoDecoder===state)this.streamingVideoDecoder=undefined;}
     if(flush){state.disposeRequested=true;if(this.streamingVideoDecoder===state)this.streamingVideoDecoder=undefined;}
     state.busy=false;
@@ -212,8 +216,10 @@ export class PlayerEngine {
     try {
       const rateScale=Number.isInteger(frameRate)?1:1001,rateDenominator=Math.round(frameRate*rateScale);
       const packets=chunks.map((data,i)=>({data,pts:mediaFrames[i]??i,time_base_num:rateScale,time_base_den:rateDenominator}));
+      const decodeStarted=performance.now();
       const decoded=await av.ff_decode_multi(ctx,pkt,frame,packets,true) as DecodedFrame[];
-      const inputMediaFrames=new Set(mediaFrames);
+      const chunkDecodeMs=performance.now()-decodeStarted;this.videoDecodeMs+=chunkDecodeMs;
+      const inputMediaFrames=new Set(mediaFrames);let chunkConvertMs=0;
       for (let i=0;i<decoded.length;i++) {
         const f=decoded[i]; if (!f.data) continue;
         if (f.format !== av.AV_PIX_FMT_YUV422P || !f.layout || f.layout.length < 3)
@@ -223,15 +229,18 @@ export class PlayerEngine {
           for(let row=0;row<f.height;row++) output.set(f.data!.subarray(layout.offset+row*layout.stride,layout.offset+row*layout.stride+width),row*width);
           return output;
         };
-        const chromaWidth=Math.ceil(f.width/2);
-        const rgba=yuv422pToRgba(plane(0,f.width),plane(1,chromaWidth),plane(2,chromaWidth),f.width,f.height);
+        const chromaWidth=Math.ceil(f.width/2),y=plane(0,f.width),u=plane(1,chromaWidth),v=plane(2,chromaWidth);
+        let renderFrame:ImageData|Yuv422Frame;
+        if(this.videoRenderMode==="yuv-webgl")renderFrame={width:f.width,height:f.height,y,u,v};
+        else{const convertStarted=performance.now(),rgba=yuv422pToRgba(y,u,v,f.width,f.height);chunkConvertMs+=performance.now()-convertStarted;renderFrame=new ImageData(new Uint8ClampedArray(rgba),f.width,f.height);}
         // libav.js builds may return decoded PTS in a codec time base rather than
         // the edit-unit values assigned to the input packets. Only use a PTS that
         // maps to this decode batch; otherwise retain decoder output order.
         const decodedPts=f.pts===undefined?Number.NaN:Number(f.pts);
         const mediaFrame=Number.isSafeInteger(decodedPts)&&inputMediaFrames.has(decodedPts)?decodedPts:mediaFrames[i]??i;
-        frames.push({frame:new ImageData(new Uint8ClampedArray(rgba),f.width,f.height),time:mediaFrame/frameRate,mediaFrame});
+        frames.push({frame:renderFrame,time:mediaFrame/frameRate,mediaFrame});
       }
+      this.videoDecodedFrames+=frames.length;this.videoColorConvertMs+=chunkConvertMs;console.info("[H422Player] video performance",{renderMode:this.videoRenderMode,inputPackets:packets.length,decodedFrames:frames.length,decodeMs:Number(chunkDecodeMs.toFixed(1)),colorConvertMs:Number(chunkConvertMs.toFixed(1)),totalDecodeMs:Number(this.videoDecodeMs.toFixed(1)),totalColorConvertMs:Number(this.videoColorConvertMs.toFixed(1))});
     } catch (error) {
       decodeFailure={error};
     }
