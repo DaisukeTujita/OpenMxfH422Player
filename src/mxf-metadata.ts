@@ -91,11 +91,12 @@ export function parseMxfMetadataKlv(result: MxfMetadataResult, key: Uint8Array, 
     const displayWidth = fields.get(0x3209), displayHeight = fields.get(0x3208);
     const frameLayout = fields.get(0x320c), aspect = rational(fields.get(0x320e));
     if (storedWidth || storedHeight || sampledWidth || sampledHeight || displayWidth || displayHeight || frameLayout || aspect) {
-      const rawStoredWidth = storedWidth ? u32(storedWidth) : undefined, rawStoredHeight = storedHeight ? u32(storedHeight) : undefined;
-      const rawSampledWidth = sampledWidth ? u32(sampledWidth) : undefined, rawSampledHeight = sampledHeight ? u32(sampledHeight) : undefined;
-      const rawDisplayWidth = displayWidth ? u32(displayWidth) : undefined, rawDisplayHeight = displayHeight ? u32(displayHeight) : undefined;
-      const layout = frameLayout?.[0], width = rawDisplayWidth ?? rawSampledWidth ?? rawStoredWidth;
-      let height = rawDisplayHeight ?? rawSampledHeight ?? rawStoredHeight;
+      const previous = result.mediaInfo.video;
+      const rawStoredWidth = storedWidth ? u32(storedWidth) : previous?.storedWidth, rawStoredHeight = storedHeight ? u32(storedHeight) : previous?.storedHeight;
+      const rawSampledWidth = sampledWidth ? u32(sampledWidth) : previous?.sampledWidth, rawSampledHeight = sampledHeight ? u32(sampledHeight) : previous?.sampledHeight;
+      const rawDisplayWidth = displayWidth ? u32(displayWidth) : previous?.displayWidth, rawDisplayHeight = displayHeight ? u32(displayHeight) : previous?.displayHeight;
+      const layout = frameLayout?.[0] ?? previous?.frameLayout, width = rawDisplayWidth ?? rawSampledWidth ?? rawStoredWidth ?? previous?.width;
+      let height = rawDisplayHeight ?? rawSampledHeight ?? rawStoredHeight ?? previous?.height;
       // XDCAM 1080i may store one 544-line field (540 picture lines plus blanking)
       // while FrameLayout=SeparateFields describes the complete 1080-line picture.
       if (layout === 1 && width === 1920 && height === 544) height = 1080;
@@ -104,7 +105,7 @@ export function parseMxfMetadataKlv(result: MxfMetadataResult, key: Uint8Array, 
         storedWidth: rawStoredWidth, storedHeight: rawStoredHeight,
         sampledWidth: rawSampledWidth, sampledHeight: rawSampledHeight,
         displayWidth: rawDisplayWidth, displayHeight: rawDisplayHeight, frameLayout: layout,
-        aspectRatio: aspect ? `${aspect[0]}:${aspect[1]}` : undefined,
+        aspectRatio: aspect ? `${aspect[0]}:${aspect[1]}` : previous?.aspectRatio,
       };
     }
     const sampleRate = rational(fields.get(0x3d03)), channels = fields.get(0x3d07), bits = fields.get(0x3d01), coding=fields.get(0x3d06), blockAlign=fields.get(0x3d0a);
