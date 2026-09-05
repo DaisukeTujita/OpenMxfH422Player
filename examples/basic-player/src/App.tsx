@@ -97,12 +97,6 @@ export function App() {
 
   return (
     <main>
-      <header>
-        <p className="eyebrow">OpenMxfH422Player / Basic example</p>
-        <h1>ローカルMXFプレイヤー</h1>
-        <p className="description">ファイルはサーバーへ送信されず、ブラウザ内でデコードされます。</p>
-      </header>
-
       <section className="panel file-panel">
         <label className="mode-control">再生方式
           <select value={mode} onChange={event=>{const nextMode=event.target.value as PlaybackMode;console.info("[H422Player example] playback mode changed", { from: mode, to: nextMode });setBuffering(false);setMode(nextMode);}}>
@@ -150,11 +144,16 @@ export function App() {
       </section>
 
       <section className="panel controls" aria-label="Playback controls">
-        <div className="timecode-display">{timecode ?? "Timecode Trackなし"}</div>
-        <div className="timecode-jump">
-          <input aria-label="タイムコード" placeholder="10:00:00:00 / 10:01:00;02" value={timecodeInput} onChange={event=>{setTimecodeInput(event.target.value);setTimecodeError("");}} onKeyDown={event=>{if(event.key==="Enter")void jumpTimecode();}} />
-          <button type="button" disabled={!mediaInfo?.selectedTimecode} onClick={()=>void jumpTimecode()}>ジャンプ</button>
-          <button type="button" disabled={!timecode} onClick={()=>setTimecodeInput(timecode??"")}>現在位置をコピー</button>
+        <div className="timecode-row">
+          <div className="current-timecode">
+            <span className="control-label">現在位置</span>
+            <strong className="timecode-display">{timecode ?? "Timecode Trackなし"}</strong>
+          </div>
+          <div className="timecode-jump">
+            <label htmlFor="timecode-input" className="control-label">ジャンプ先</label>
+            <input id="timecode-input" aria-label="タイムコード" placeholder="10:00:00:00" value={timecodeInput} onChange={event=>{setTimecodeInput(event.target.value);setTimecodeError("");}} onKeyDown={event=>{if(event.key==="Enter")void jumpTimecode();}} />
+            <button type="button" disabled={!mediaInfo?.selectedTimecode} onClick={()=>void jumpTimecode()}>ジャンプ</button>
+          </div>
         </div>
         {timecodeError && <p className="timecode-error">{timecodeError}</p>}
         <div className="button-row">
@@ -179,7 +178,7 @@ export function App() {
       </section>
 
       <section className="status-grid" aria-live="polite">
-        <div className="panel"><h2>再生状態</h2><strong className={`status status-${status}`}>{seeking ? "シーク中" : statusLabels[status]}</strong><p>再生位置: {formatTime(currentTime)}</p><p>タイムコード: {timecode ?? "タイムコードなし"}</p></div>
+        <div className="panel playback-summary"><h2>再生状態</h2><strong className={`status status-${status}`}>{seeking ? "シーク中" : statusLabels[status]}</strong><p>再生位置: {formatTime(currentTime)}</p><p>タイムコード: {timecode ?? "タイムコードなし"}</p><h2 className="error-heading">エラー</h2><p className={error ? "status-error-message" : undefined}>{error || "エラーはありません"}</p></div>
         <div className="panel media-inspection">
           <h2>MXF解析情報</h2>
           <dl>
@@ -197,8 +196,7 @@ export function App() {
             <dt>Index Table</dt><dd>{mediaInfo ? `${mediaInfo.indexTableCount > 0 ? "あり" : "なし"}（${mediaInfo.indexTableCount} table / ${mediaInfo.indexEntryCount} entries）` : "未取得"}</dd>
           </dl>
         </div>
-        <div className="panel error-panel"><h2>エラー</h2><p>{error || "エラーはありません"}</p></div>
-        <div className="panel"><h2>Streaming診断</h2><p>方式: {mode} / 描画: {diagnostics?.videoRenderMode??videoRenderMode}</p><p>映像性能: decode {diagnostics?.videoDecodeMs.toFixed(1)??"-"} ms / RGBA変換 {diagnostics?.videoColorConvertMs.toFixed(1)??"-"} ms / GPU転送・描画 {diagnostics?.videoUploadMs.toFixed(1)??"-"} ms / {diagnostics?.videoDecodedFrames??0} frames</p><p>TC Track: {diagnostics?.selectedTimecodeTrack??"なし"} / {diagnostics?.timecodeSelectionReason??"-"}</p><p>seek: requested {diagnostics?.requestedTimecode??diagnostics?.requestedFrame??"-"} / actual {diagnostics?.actualDisplayedFrame??"-"} / start {diagnostics?.seekStartFrame??"-"} / preroll {diagnostics?.prerollFrames??0} / {diagnostics?.seekSource??"-"}</p><p>seek I/O: {diagnostics?.seekReadBytes??0} bytes / {diagnostics?.seekElapsedMs?.toFixed(1)??"-"} ms</p><p>ファイル: {diagnostics?.fileSize??0} bytes</p><p>Reader: {diagnostics?.bytesLoaded??0} bytes / {diagnostics?.underlyingReadCount??0} reads</p><p>キャッシュ: {diagnostics?.cacheBytes??0} bytes</p><p>映像キュー: {diagnostics?.videoQueueFrames??0} frames ({diagnostics?.videoQueueStart?.toFixed(2)??"-"}–{diagnostics?.videoQueueEnd?.toFixed(2)??"-"}s)</p><p>音声状態: {mode!=="streaming"?"legacy":buffering?"buffering中":diagnostics?.streamingAudioSupported?(status==="playing"?"対応・再生中":"対応"):mediaInfo?.audio?"未対応形式のため映像のみ":"音声なし"}</p><p>音声形式: {diagnostics?.audioSampleRate??"-"} Hz / {diagnostics?.audioChannels??"-"} ch / track {diagnostics?.selectedAudioTrackNumber??"-"}</p><p>音声キュー: {diagnostics?.audioQueueStart?.toFixed(2)??"-"}–{diagnostics?.audioQueueEnd?.toFixed(2)??"-"}s / {diagnostics?.scheduledAudioRanges??0} nodes / {diagnostics?.audioBytesLoaded??0} bytes / {diagnostics?.audioExhausted?"終端":"補充中"}</p><p>形式判定: {diagnostics?.audioFormatBasis??"-"}</p><p>A/V drift: {diagnostics?.audioVideoDriftMs?.toFixed(1)??"-"} ms</p><p>世代: load {diagnostics?.loadGeneration??0} / seek {diagnostics?.seekGeneration??0}</p></div>
+        <div className="panel streaming-diagnostics"><h2>Streaming診断</h2><p>方式: {mode} / 描画: {diagnostics?.videoRenderMode??videoRenderMode}</p><p>映像性能: decode {diagnostics?.videoDecodeMs.toFixed(1)??"-"} ms / RGBA変換 {diagnostics?.videoColorConvertMs.toFixed(1)??"-"} ms / GPU転送・描画 {diagnostics?.videoUploadMs.toFixed(1)??"-"} ms / {diagnostics?.videoDecodedFrames??0} frames</p><p>TC Track: {diagnostics?.selectedTimecodeTrack??"なし"} / {diagnostics?.timecodeSelectionReason??"-"}</p><p>seek: requested {diagnostics?.requestedTimecode??diagnostics?.requestedFrame??"-"} / actual {diagnostics?.actualDisplayedFrame??"-"} / start {diagnostics?.seekStartFrame??"-"} / preroll {diagnostics?.prerollFrames??0} / {diagnostics?.seekSource??"-"}</p><p>seek I/O: {diagnostics?.seekReadBytes??0} bytes / {diagnostics?.seekElapsedMs?.toFixed(1)??"-"} ms</p><p>ファイル: {diagnostics?.fileSize??0} bytes</p><p>Reader: {diagnostics?.bytesLoaded??0} bytes / {diagnostics?.underlyingReadCount??0} reads</p><p>キャッシュ: {diagnostics?.cacheBytes??0} bytes</p><p>映像キュー: {diagnostics?.videoQueueFrames??0} frames ({diagnostics?.videoQueueStart?.toFixed(2)??"-"}–{diagnostics?.videoQueueEnd?.toFixed(2)??"-"}s)</p><p>音声状態: {mode!=="streaming"?"legacy":buffering?"buffering中":diagnostics?.streamingAudioSupported?(status==="playing"?"対応・再生中":"対応"):mediaInfo?.audio?"未対応形式のため映像のみ":"音声なし"}</p><p>音声形式: {diagnostics?.audioSampleRate??"-"} Hz / {diagnostics?.audioChannels??"-"} ch / track {diagnostics?.selectedAudioTrackNumber??"-"}</p><p>音声キュー: {diagnostics?.audioQueueStart?.toFixed(2)??"-"}–{diagnostics?.audioQueueEnd?.toFixed(2)??"-"}s / {diagnostics?.scheduledAudioRanges??0} nodes / {diagnostics?.audioBytesLoaded??0} bytes / {diagnostics?.audioExhausted?"終端":"補充中"}</p><p>形式判定: {diagnostics?.audioFormatBasis??"-"}</p><p>A/V drift: {diagnostics?.audioVideoDriftMs?.toFixed(1)??"-"} ms</p><p>世代: load {diagnostics?.loadGeneration??0} / seek {diagnostics?.seekGeneration??0}</p></div>
       </section>
     </main>
   );
