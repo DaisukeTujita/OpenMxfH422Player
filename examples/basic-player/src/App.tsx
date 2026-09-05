@@ -150,11 +150,16 @@ export function App() {
       </section>
 
       <section className="panel controls" aria-label="Playback controls">
-        <div className="timecode-display">{timecode ?? "Timecode Trackなし"}</div>
-        <div className="timecode-jump">
-          <input aria-label="タイムコード" placeholder="10:00:00:00 / 10:01:00;02" value={timecodeInput} onChange={event=>{setTimecodeInput(event.target.value);setTimecodeError("");}} onKeyDown={event=>{if(event.key==="Enter")void jumpTimecode();}} />
-          <button type="button" disabled={!mediaInfo?.selectedTimecode} onClick={()=>void jumpTimecode()}>ジャンプ</button>
-          <button type="button" disabled={!timecode} onClick={()=>setTimecodeInput(timecode??"")}>現在位置をコピー</button>
+        <div className="timecode-row">
+          <div className="current-timecode">
+            <span className="control-label">現在位置</span>
+            <strong className="timecode-display">{timecode ?? "Timecode Trackなし"}</strong>
+          </div>
+          <div className="timecode-jump">
+            <label htmlFor="timecode-input" className="control-label">ジャンプ先</label>
+            <input id="timecode-input" aria-label="タイムコード" placeholder="10:00:00:00" value={timecodeInput} onChange={event=>{setTimecodeInput(event.target.value);setTimecodeError("");}} onKeyDown={event=>{if(event.key==="Enter")void jumpTimecode();}} />
+            <button type="button" disabled={!mediaInfo?.selectedTimecode} onClick={()=>void jumpTimecode()}>ジャンプ</button>
+          </div>
         </div>
         {timecodeError && <p className="timecode-error">{timecodeError}</p>}
         <div className="button-row">
