@@ -1,5 +1,16 @@
 # Codex standard workflow
 
+## Branching and pull requests (mandatory for every change, however small)
+
+- Never push commits directly to `main`. Always create a working branch first, commit the change there, push that branch to GitHub, and open a Pull Request.
+- Do not merge the PR yourself and do not push further commits to `main`. Wait for the repository owner to review the diff and merge it.
+- This applies to every agent and every session working in this repository, not just the one that adds this rule.
+
+## Versioning
+
+- Whenever a change adds a feature, fixes a bug, or otherwise changes runtime behavior (including internal/perf changes like refactors that alter behavior), bump the `version` field in the root `package.json` in the same change. Follow semver: `patch` for bug fixes with no behavior/API change beyond the fix, `minor` for backward-compatible feature additions or notable internal improvements (e.g. a new decoding architecture, new diagnostics fields), `major` for breaking changes to the public API (`src/index.ts` exports).
+- Do not forget this step just because the change is internal — consumers use the version number to tell whether a build actually includes a given fix.
+
 Codex must perform this workflow autonomously for every repository change:
 
 1. Read the diff from `main` and all related implementation first.

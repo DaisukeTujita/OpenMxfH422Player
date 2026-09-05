@@ -3,6 +3,9 @@
 body { margin: 0; min-width: 320px; }
 button, input { font: inherit; }
 main { width: min(1040px, calc(100% - 32px)); margin: 0 auto; padding: 24px 0 80px; }
+.app-header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+.app-title { font-weight: 700; font-size: 1.1rem; }
+.app-version { color: #9aa7b8; font-size: .8rem; font-variant-numeric: tabular-nums; }
 .filename { color: #9aa7b8; }
 .panel { padding: 20px; border: 1px solid #283142; border-radius: 14px; background: #121722; }
 .file-panel { display: grid; grid-template-columns: auto auto auto minmax(10rem, 1fr); align-items: center; gap: 12px; margin-bottom: 18px; min-height: 74px; }
