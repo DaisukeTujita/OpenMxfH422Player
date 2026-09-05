@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { decodeLegacy, decodeStreaming, handleWorkerRequest, initDecoder, invalidateStreaming, type DecodeWorkerState } from "./video-decode-core";
+import { decodeLegacy, decodeResultTransferables, decodeStreaming, handleWorkerRequest, initDecoder, invalidateStreaming, toDecodeResult, type DecodeWorkerState, type WireDecodeResult } from "./video-decode-core";
 
 type DecoderMock = {
   AV_PIX_FMT_YUV422P?: number;
@@ -62,7 +62,6 @@ describe("decodeLegacy", () => {
   });
 
   it("falls back to input edit-unit order when decoded PTS uses another time base", async () => {
-    vi.stubGlobal("ImageData", class { constructor(public data: Uint8ClampedArray, public width: number, public height: number) {} });
     const decodedFrame = (pts: number) => ({
       pts, width: 2, height: 1, format: 4,
       data: new Uint8Array([16, 16, 128, 128]),
@@ -79,11 +78,9 @@ describe("decodeLegacy", () => {
 
     expect(result.frames.map(item => item.mediaFrame)).toEqual([100, 101]);
     expect(result.frames.map(item => item.time)).toEqual([4, 4.04]);
-    vi.unstubAllGlobals();
   });
 
   it("keeps valid decoded PTS so reordered MPEG-2 output retains its edit units", async () => {
-    vi.stubGlobal("ImageData", class { constructor(public data: Uint8ClampedArray, public width: number, public height: number) {} });
     const decodedFrame = (pts: number) => ({
       pts, width: 2, height: 1, format: 4,
       data: new Uint8Array([16, 16, 128, 128]),
@@ -99,7 +96,6 @@ describe("decodeLegacy", () => {
     const result = await decodeLegacy({ av: av as any }, { codecId: 2, chunks: [new Uint8Array([1]), new Uint8Array([2]), new Uint8Array([3])], mediaFrames: [100, 101, 102], frameRate: 25, videoRenderMode: "rgba" });
 
     expect(result.frames.map(item => item.mediaFrame)).toEqual([102, 100, 101]);
-    vi.unstubAllGlobals();
   });
 });
 
@@ -182,6 +178,53 @@ describe("handleWorkerRequest", () => {
     const state: DecodeWorkerState = {};
     await expect(handleWorkerRequest(state, { id: 1, type: "init", base: "/libav" })).rejects.toThrow("Failed to fetch custom libav.js frontend");
     vi.unstubAllGlobals();
+  });
+});
+
+describe("worker boundary handoff", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  const decoded = { pts: 0, width: 2, height: 1, format: 4, data: new Uint8Array([16, 235, 128, 128]), layout: [{ offset: 0, stride: 2 }, { offset: 2, stride: 1 }, { offset: 3, stride: 1 }] };
+  const decoderMock = (): DecoderMock => ({ AV_PIX_FMT_YUV422P: 4, ff_init_decoder: vi.fn().mockResolvedValue([11, 22, 33, 44]), ff_decode_multi: vi.fn().mockResolvedValue([decoded]), ff_free_decoder: vi.fn().mockResolvedValue(undefined) });
+  const decode = (videoRenderMode: "rgba" | "yuv-webgl") =>
+    decodeLegacy({ av: decoderMock() as any }, { codecId: 2, chunks: [new Uint8Array([1])], mediaFrames: [0], frameRate: 25, videoRenderMode });
+
+  it.each(["rgba", "yuv-webgl"] as const)("survives a real structured clone with transfer in %s mode", async videoRenderMode => {
+    const result = await decode(videoRenderMode);
+    const transfer = decodeResultTransferables(result);
+    expect(transfer.length).toBe(videoRenderMode === "rgba" ? 1 : 3);
+    const expected = structuredClone(result.frames[0].frame);
+
+    const cloned = structuredClone(result, { transfer }) as WireDecodeResult;
+
+    expect(cloned.frames[0].frame).toEqual(expected);
+    expect(transfer.every(buffer => buffer.byteLength === 0)).toBe(true);
+  });
+
+  it("transfers each backing buffer in whole and never lists one twice", async () => {
+    const result = await decode("yuv-webgl");
+    const frame = result.frames[0].frame;
+    if (frame.kind !== "yuv422p") throw new Error("expected planar frame");
+    for (const plane of [frame.y, frame.u, frame.v]) {
+      expect(plane.byteOffset).toBe(0);
+      expect(plane.byteLength).toBe(plane.buffer.byteLength);
+    }
+    const transfer = decodeResultTransferables({ ...result, frames: [...result.frames, ...result.frames] });
+    expect(new Set(transfer).size).toBe(transfer.length);
+  });
+
+  it("rebuilds ImageData on the main thread and passes planar frames through unchanged", () => {
+    vi.stubGlobal("ImageData", class { constructor(public data: Uint8ClampedArray, public width: number, public height: number) {} });
+    const planar = { kind: "yuv422p", width: 2, height: 1, y: new Uint8Array([16, 235]), u: new Uint8Array([128]), v: new Uint8Array([128]) } as const;
+    const rgba = { kind: "rgba", width: 1, height: 1, data: new Uint8ClampedArray([1, 2, 3, 255]) } as const;
+    const wire: WireDecodeResult = { decodeMs: 5, convertMs: 1, frames: [{ frame: planar, time: 0, mediaFrame: 0 }, { frame: rgba, time: 0.04, mediaFrame: 1 }] };
+
+    const result = toDecodeResult(wire);
+
+    expect(result.frames[0].frame).toBe(planar);
+    expect(result.frames[1].frame).toBeInstanceOf(ImageData);
+    expect(result.frames[1].frame).toMatchObject({ width: 1, height: 1, data: rgba.data });
+    expect(result).toMatchObject({ decodeMs: 5, convertMs: 1 });
   });
 });
 

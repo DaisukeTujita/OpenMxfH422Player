@@ -4,7 +4,7 @@ export const XDCAM_FRAME_RATE = 30000 / 1001;
 
 export interface DetectedCodec { codecId: number; codecName: string }
 
-export function yuv422pToRgba(y: Uint8Array, u: Uint8Array, v: Uint8Array, width: number, height: number, output?: Uint8ClampedArray): Uint8ClampedArray {
+export function yuv422pToRgba(y: Uint8Array, u: Uint8Array, v: Uint8Array, width: number, height: number, output?: Uint8ClampedArray<ArrayBuffer>): Uint8ClampedArray<ArrayBuffer> {
   if (y.length < width * height || u.length < Math.ceil(width / 2) * height || v.length < Math.ceil(width / 2) * height)
     throw new Error("Truncated yuv422p frame");
   const rgba = output ?? new Uint8ClampedArray(width * height * 4);

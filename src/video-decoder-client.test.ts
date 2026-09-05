@@ -10,7 +10,7 @@ class FakeWorker {
   constructor(public url: URL, public options?: unknown) { FakeWorker.instances.push(this); }
   postMessage(message: any) { this.posted.push(message); }
   terminate() { this.terminated = true; }
-  reply(id: number, ok: boolean, payload?: unknown, message?: string) { this.onmessage?.({ data: { id, ok, payload, message } }); }
+  reply(id: number, ok: boolean, payload?: unknown, rest?: { name?: string; message?: string; stack?: string }) { this.onmessage?.({ data: { id, ok, payload, ...rest } }); }
   fail(message: string) { this.onerror?.({ message }); }
 }
 
@@ -41,8 +41,25 @@ describe("createWorkerVideoDecoderClient", () => {
   it("rejects with the worker's error message", async () => {
     const { client, worker } = setup();
     const promise = client.init("/libav");
-    worker.reply(1, false, undefined, "boom");
+    worker.reply(1, false, undefined, { message: "boom" });
     await expect(promise).rejects.toThrow("boom");
+  });
+
+  it("preserves the worker error's name and stack so the full failure survives the boundary", async () => {
+    const { client, worker } = setup();
+    const promise = client.init("/libav");
+    worker.reply(1, false, undefined, { name: "DataCloneError", message: "Data cannot be cloned, out of memory.", stack: "DataCloneError: Data cannot be cloned, out of memory.\n    at postMessage" });
+    await expect(promise).rejects.toMatchObject({ name: "DataCloneError", message: "Data cannot be cloned, out of memory.", stack: expect.stringContaining("at postMessage") });
+  });
+
+  it("rebuilds ImageData from the wire payload the worker transferred", async () => {
+    vi.stubGlobal("ImageData", class { constructor(public data: Uint8ClampedArray, public width: number, public height: number) {} });
+    const { client, worker } = setup();
+    const promise = client.decodeVideo([], 2, [], 25, "rgba");
+    worker.reply(1, true, { decodeMs: 3, convertMs: 2, frames: [{ time: 0, mediaFrame: 0, frame: { kind: "rgba", width: 1, height: 1, data: new Uint8ClampedArray([1, 2, 3, 255]) } }] });
+    const result = await promise;
+    expect(result.frames[0].frame).toBeInstanceOf(ImageData);
+    expect(result.frames[0].frame).toMatchObject({ width: 1, height: 1 });
   });
 
   it("correlates concurrent requests by id and returns each payload to its own caller", async () => {

@@ -4,8 +4,39 @@ import type { Yuv422Frame } from "./webgl";
 import type { VideoRenderMode } from "./types";
 
 export type RawDecodedFrame = { data?: Uint8Array; layout?: Array<{ offset: number; stride: number }>; width: number; height: number; format?: number; pts?: number };
+
+/**
+ * Frames cross the Worker boundary as plain objects holding only freshly allocated TypedArrays,
+ * so every backing ArrayBuffer can be transferred instead of structured-cloned. A whole chunk of
+ * 1080-line 4:2:2 frames is hundreds of megabytes; cloning it duplicates that in the serializer
+ * and makes the reply fail with "Data cannot be cloned, out of memory".
+ */
+export type WireFrame =
+  | { kind: "yuv422p"; width: number; height: number; y: Uint8Array; u: Uint8Array; v: Uint8Array }
+  | { kind: "rgba"; width: number; height: number; data: Uint8ClampedArray<ArrayBuffer> };
+export interface WireRenderFrame { frame: WireFrame; time: number; mediaFrame: number }
+export interface WireDecodeResult { frames: WireRenderFrame[]; decodeMs: number; convertMs: number }
+
 export type WorkerRenderFrame = { frame: ImageData | Yuv422Frame; time: number; mediaFrame: number };
 export interface DecodeResult { frames: WorkerRenderFrame[]; decodeMs: number; convertMs: number }
+
+/** Every buffer is allocated per frame, so the Set only guards against a caller passing one result twice. */
+export function decodeResultTransferables(result: WireDecodeResult): ArrayBuffer[] {
+  const buffers = new Set<ArrayBuffer>();
+  for (const { frame } of result.frames) {
+    if (frame.kind === "rgba") buffers.add(frame.data.buffer as ArrayBuffer);
+    else for (const plane of [frame.y, frame.u, frame.v]) buffers.add(plane.buffer as ArrayBuffer);
+  }
+  return [...buffers];
+}
+
+/** A yuv422p wire frame already satisfies Yuv422Frame; only RGBA needs its ImageData rebuilt. */
+export function toDecodeResult(wire: WireDecodeResult): DecodeResult {
+  return {
+    decodeMs: wire.decodeMs, convertMs: wire.convertMs,
+    frames: wire.frames.map(({ frame, time, mediaFrame }) => ({ time, mediaFrame, frame: frame.kind === "rgba" ? new ImageData(frame.data, frame.width, frame.height) : frame })),
+  };
+}
 
 interface StreamingDecoderState { av: LibAV; codecId: number; ctx: number; pkt: number; frame: number; loadGeneration: number; seekGeneration: number; busy: boolean; disposeRequested: boolean; disposed: boolean }
 
@@ -37,19 +68,19 @@ function extractPlanes(f: RawDecodedFrame, av: LibAV): { y: Uint8Array; u: Uint8
  * persistent decoder, so a decoded PTS may still belong to a neighboring chunk still draining
  * the decoder's reorder buffer; it is instead validated against the whole media's frame range.
  */
-function buildFrames(decoded: RawDecodedFrame[], av: LibAV, mediaFrames: number[], frameRate: number, videoRenderMode: VideoRenderMode, ptsValidation: { mode: "input-set" } | { mode: "media-range"; maxMediaFrame: number }): { frames: WorkerRenderFrame[]; convertMs: number } {
-  const frames: WorkerRenderFrame[] = []; let convertMs = 0;
+function buildFrames(decoded: RawDecodedFrame[], av: LibAV, mediaFrames: number[], frameRate: number, videoRenderMode: VideoRenderMode, ptsValidation: { mode: "input-set" } | { mode: "media-range"; maxMediaFrame: number }): { frames: WireRenderFrame[]; convertMs: number } {
+  const frames: WireRenderFrame[] = []; let convertMs = 0;
   const inputMediaFrames = ptsValidation.mode === "input-set" ? new Set(mediaFrames) : undefined;
   for (let i = 0; i < decoded.length; i++) {
     const f = decoded[i]; if (!f.data) continue;
     const { y, u, v } = extractPlanes(f, av);
-    let renderFrame: ImageData | Yuv422Frame;
-    if (videoRenderMode === "yuv-webgl") renderFrame = { width: f.width, height: f.height, y, u, v };
+    let renderFrame: WireFrame;
+    if (videoRenderMode === "yuv-webgl") renderFrame = { kind: "yuv422p", width: f.width, height: f.height, y, u, v };
     else {
       const started = performance.now();
       const rgba = yuv422pToRgba(y, u, v, f.width, f.height);
       convertMs += performance.now() - started;
-      renderFrame = new ImageData(new Uint8ClampedArray(rgba), f.width, f.height);
+      renderFrame = { kind: "rgba", width: f.width, height: f.height, data: rgba };
     }
     const decodedPts = f.pts === undefined ? Number.NaN : Number(f.pts);
     const mediaFrame = ptsValidation.mode === "input-set"
@@ -62,11 +93,11 @@ function buildFrames(decoded: RawDecodedFrame[], av: LibAV, mediaFrames: number[
 
 export interface DecodeLegacyRequest { codecId: number; chunks: Uint8Array[]; mediaFrames: number[]; frameRate: number; videoRenderMode: VideoRenderMode }
 
-export async function decodeLegacy(state: DecodeWorkerState, request: DecodeLegacyRequest): Promise<DecodeResult> {
+export async function decodeLegacy(state: DecodeWorkerState, request: DecodeLegacyRequest): Promise<WireDecodeResult> {
   const av = state.av!;
   // ff_init_decoder receives the codec_id detected for the MXF essence (AV_CODEC_ID_MPEG2VIDEO=2).
   const [, ctx, pkt, frame] = await av.ff_init_decoder(request.codecId);
-  let decodeFailure: { error: unknown } | undefined; let result: DecodeResult = { frames: [], decodeMs: 0, convertMs: 0 };
+  let decodeFailure: { error: unknown } | undefined; let result: WireDecodeResult = { frames: [], decodeMs: 0, convertMs: 0 };
   try {
     const rateScale = Number.isInteger(request.frameRate) ? 1 : 1001, rateDenominator = Math.round(request.frameRate * rateScale);
     const packets = request.chunks.map((data, i) => ({ data, pts: request.mediaFrames[i] ?? i, time_base_num: rateScale, time_base_den: rateDenominator }));
@@ -97,7 +128,7 @@ function hasReusableStreamingDecoder(state: DecodeWorkerState, request: DecodeSt
   return Boolean(decoder && !decoder.disposed && !decoder.disposeRequested && decoder.loadGeneration === request.loadGeneration && decoder.seekGeneration === request.seekGeneration && decoder.codecId === request.codecId);
 }
 
-export async function decodeStreaming(state: DecodeWorkerState, request: DecodeStreamingRequest): Promise<DecodeResult> {
+export async function decodeStreaming(state: DecodeWorkerState, request: DecodeStreamingRequest): Promise<WireDecodeResult> {
   const av = state.av!;
   if (!hasReusableStreamingDecoder(state, request)) {
     if (state.streaming) invalidateStreaming(state);
@@ -105,7 +136,7 @@ export async function decodeStreaming(state: DecodeWorkerState, request: DecodeS
     state.streaming = { av, codecId: request.codecId, ctx, pkt, frame, loadGeneration: request.loadGeneration, seekGeneration: request.seekGeneration, busy: false, disposeRequested: false, disposed: false };
   }
   const decoder = state.streaming!;
-  decoder.busy = true; let failure: unknown; let result: DecodeResult = { frames: [], decodeMs: 0, convertMs: 0 };
+  decoder.busy = true; let failure: unknown; let result: WireDecodeResult = { frames: [], decodeMs: 0, convertMs: 0 };
   try {
     const rateScale = Number.isInteger(request.frameRate) ? 1 : 1001, rateDenominator = Math.round(request.frameRate * rateScale);
     const packets = request.chunks.map((data, i) => ({ data, pts: request.mediaFrames[i] ?? i, time_base_num: rateScale, time_base_den: rateDenominator }));
@@ -137,7 +168,7 @@ export type WorkerRequest =
   | { id: number; type: "invalidate-streaming" }
   | { id: number; type: "dispose" };
 
-export async function handleWorkerRequest(state: DecodeWorkerState, request: WorkerRequest): Promise<unknown> {
+export async function handleWorkerRequest(state: DecodeWorkerState, request: WorkerRequest): Promise<WireDecodeResult | undefined> {
   switch (request.type) {
     case "init": await initDecoder(state, request.base); return undefined;
     case "decode-legacy": return decodeLegacy(state, request);
