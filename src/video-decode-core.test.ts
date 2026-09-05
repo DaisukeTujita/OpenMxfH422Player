@@ -230,6 +230,7 @@ describe("worker boundary handoff", () => {
 
 describe("initDecoder", () => {
   it("rejects a libav build without swscale support", async () => {
+    vi.stubGlobal("self", { location: { href: "https://player.example/index.html" } });
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("frontend source")));
     const moduleUrl = `data:text/javascript,${encodeURIComponent("export async function LibAV() { return { libavjs_with_swscale: async () => 0 }; }")}`;
     vi.spyOn(URL, "createObjectURL").mockReturnValue(moduleUrl);
@@ -237,5 +238,6 @@ describe("initDecoder", () => {
     const state: DecodeWorkerState = {};
     await expect(initDecoder(state, "/libav")).rejects.toThrow("Custom libav.js was built without swscale");
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
   });
 });
