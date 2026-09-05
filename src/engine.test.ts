@@ -195,6 +195,12 @@ describe("PlayerEngine streaming decoder reuse", () => {
     expect(info).toHaveBeenCalledWith("[H422Player] video performance",expect.objectContaining({renderMode:"yuv-webgl",inputPackets:1,decodedFrames:1,colorConvertMs:0}));
     info.mockRestore();
   });
+  it("raises the GPU buffer target when measured decode cost would overlap playback",()=>{
+    const engine=Object.create(PlayerEngine.prototype) as any;Object.assign(engine,{videoRenderMode:"yuv-webgl",videoAheadSeconds:6,refillThresholdSeconds:4,chunkSeconds:3,adaptiveVideoAheadSeconds:6,adaptiveRefillThresholdSeconds:4});
+    engine.adaptStreamingBuffer(2300,90,30);
+    expect(engine.adaptiveVideoAheadSeconds).toBe(9);
+    expect(engine.adaptiveRefillThresholdSeconds).toBeGreaterThan(4);
+  });
 });
 
 describe("selectTimecodeTrack unresolved package fallback", () => {
@@ -249,7 +255,7 @@ describe("PlayerEngine stale load suppression",()=>{
 describe("PlayerEngine streaming mode",()=>{
   afterEach(()=>{vi.unstubAllGlobals();vi.restoreAllMocks();});
   it("prebuffers six seconds before ready while keeping the random-access reader",async()=>{
-    const readWhole=vi.fn(),destroy=vi.fn(),readRange=vi.fn().mockResolvedValue([{kind:"video",data:new Uint8Array([0,0,1,0xb3]),editUnit:0}]);
+    const readWhole=vi.fn(),destroy=vi.fn(),readRange=vi.fn().mockImplementation(async(_reader:any,_index:any,options:any)=>Array.from({length:options.endFrame-options.startFrame+1},(_,offset)=>({kind:"video",data:new Uint8Array([0,0,1,0xb3]),editUnit:options.startFrame+offset})));
     const callbacks={status:vi.fn(),ready:vi.fn(),time:vi.fn(),error:vi.fn(),mediaInfo:vi.fn(),timecode:vi.fn(),diagnostics:vi.fn()};
     const engine=Object.create(PlayerEngine.prototype) as any;
     Object.assign(engine,{callbacks,renderer:{draw:vi.fn()},mode:"streaming",frames:[],loadGeneration:0,seekGeneration:0,destroyed:false,videoAheadSeconds:6,retainBehindSeconds:1,refillThresholdSeconds:4,chunkSeconds:3,maxReadSize:1024,dependencies:{
@@ -257,7 +263,7 @@ describe("PlayerEngine streaming mode",()=>{
       parseMetadata:async()=>({mediaInfo:{operationalPattern:"OP1a",essenceContainer:"060e2b34",video:{width:1920,height:1080},durationFrames:300,timecodeTrackCount:0,indexTableCount:0,indexEntryCount:0},timecodes:[],indexTables:[],partitions:[{offset:0n,kind:"header"}]}),
       indexEssence:async()=>({frameRate:30,partitions:[],packets:Array.from({length:300},(_,editUnit)=>({kind:"video",editUnit}))}),readRange,readWhole,parse:vi.fn(),loadLibav:async()=>({libavjs_with_swscale:async()=>1})
     }});
-    engine.decodeStreamingVideo=async()=>[{frame:{width:2,height:2},time:0,mediaFrame:0}];
+    engine.decodeStreamingVideo=async(_chunks:any[],mediaFrames:number[],frameRate:number)=>mediaFrames.map(mediaFrame=>({frame:{width:2,height:2},time:mediaFrame/frameRate,mediaFrame}));
     engine.requestFill=vi.fn();engine.requestAudioFill=vi.fn();
     await engine.load(new Blob([new Uint8Array(1000)]));
     expect(readWhole).not.toHaveBeenCalled();
