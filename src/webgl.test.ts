@@ -45,6 +45,7 @@ function createWebGlMock() {
     pixelStorei: vi.fn(),
     shaderSource: vi.fn(),
     texImage2D: vi.fn(),
+    texSubImage2D: vi.fn(),
     texParameteri: vi.fn(),
     uniform1i: vi.fn(),
     useProgram: vi.fn(),
@@ -81,6 +82,9 @@ describe("WebGlRenderer", () => {
     expect(gl.getError).not.toHaveBeenCalled();
     expect(canvas.width).toBe(1920);
     expect(canvas.height).toBe(1080);
+    renderer.draw(frame, 1920, 1080);
+    expect(gl.texImage2D).toHaveBeenCalledTimes(1);
+    expect(gl.texSubImage2D).toHaveBeenCalledOnce();
   });
   it("uploads planar yuv422p without creating an RGBA image", () => {
     const gl=createWebGlMock();
@@ -92,6 +96,9 @@ describe("WebGlRenderer", () => {
     expect(gl.texImage2D).toHaveBeenNthCalledWith(1,gl.TEXTURE_2D,0,gl.LUMINANCE,4,2,0,gl.LUMINANCE,gl.UNSIGNED_BYTE,expect.any(Uint8Array));
     expect(gl.texImage2D).toHaveBeenNthCalledWith(2,gl.TEXTURE_2D,0,gl.LUMINANCE,2,2,0,gl.LUMINANCE,gl.UNSIGNED_BYTE,expect.any(Uint8Array));
     expect(gl.texImage2D).toHaveBeenNthCalledWith(3,gl.TEXTURE_2D,0,gl.LUMINANCE,2,2,0,gl.LUMINANCE,gl.UNSIGNED_BYTE,expect.any(Uint8Array));
+    gl.texSubImage2D.mockClear();
+    renderer.draw({width:4,height:2,y:new Uint8Array(8),u:new Uint8Array(4),v:new Uint8Array(4)},4,2);
+    expect(gl.texSubImage2D).toHaveBeenCalledTimes(3);
   });
 
 });
