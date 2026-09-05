@@ -241,14 +241,23 @@ export class PlayerEngine {
   }
   private stopAudioSource():void { this.stopStreamingAudioSources();const source=this.audioSource;this.audioSource=undefined;if(!source)return;try{source.stop();}catch{/* An AudioBufferSourceNode can only be stopped once on some implementations. */}try{source.disconnect();}catch{/* A disconnected node is already harmless. */} }
   private startAudio(offset:number):void { if(!this.audio||!this.audioBuffer)return; this.stopAudioSource(); const node=this.audio.createBufferSource(); node.buffer=this.audioBuffer; node.connect(this.audio.destination); node.start(0,Math.min(offset,this.audioBuffer.duration)); this.audioSource=node; }
-  /** Re-checks the streaming buffer on a fixed interval so a delayed rAF tick cannot postpone a refill. Self-terminates once playback stops. */
+  /**
+   * Releases everything the playhead has passed. A decoded 1080-line 4:2:2 frame is ~4 MB, so this
+   * must not be tied to rAF: a hidden tab stops rAF while the refill timer keeps queueing frames.
+   */
+  private evictPlayedMedia(t:number):void{
+    this.evictFramesBefore(t-this.retainBehindSeconds);
+    this.audioChunks=(this.audioChunks??[]).filter(chunk=>chunk.mediaEndTime>=t-.1);
+    this.scheduledAudio=(this.scheduledAudio??[]).filter(range=>!range.ended&&range.mediaEndTime>=t-.1);
+  }
+  /** Re-checks the streaming buffer on a fixed interval so a delayed rAF tick cannot postpone a refill or an eviction. Self-terminates once playback stops. */
   private scheduleRefillCheck():void{
     if(this.mode!=="streaming"||this.refillCheckActive)return;
     this.refillCheckActive=true;
     setTimeout(()=>{
       this.refillCheckActive=false;
       if(this.destroyed||this.status!=="playing")return;
-      const t=this.currentTime;this.requestFill(t);this.requestAudioFill(t);
+      const t=this.currentTime;this.evictPlayedMedia(t);this.requestFill(t);this.requestAudioFill(t);
       this.scheduleRefillCheck();
     },250);
   }
@@ -258,6 +267,6 @@ export class PlayerEngine {
   async seekTimecode(value:string):Promise<void>{ if(!this.timecodeInfo) throw new Error("timecode-track-unavailable"); this.requestedTimecode=null; const fps=this.essenceIndex?.frameRate??this.timecodeInfo.editRateNumerator/this.timecodeInfo.editRateDenominator,maxFrames=Math.ceil(this.durationValue*fps); const frame=timecodeToMediaFrame({...this.timecodeInfo,durationFrames:this.timecodeInfo.durationFrames===undefined?maxFrames:Math.min(this.timecodeInfo.durationFrames,maxFrames)},value), expectedGeneration=this.seekGeneration+1; await this.seek(frame/fps,true); if(expectedGeneration!==this.seekGeneration||this.destroyed)return; this.requestedTimecode=value; this.requestedFrame=frame; this.publishDiagnostics(); }
   private emitTime(t:number){this.callbacks.time(t);this.callbacks.timecode?.(this.timecodeInfo ? timecodeAtSeconds(this.timecodeInfo,t) : null);}
   private drawAt(t:number,exact=false):RenderFrame|undefined{const requested=Math.round(t*(this.essenceIndex?.frameRate??XDCAM_FRAME_RATE));let f:RenderFrame|undefined;if(this.mode==="streaming"){if(exact)f=this.frames.find(item=>item.mediaFrame===requested);else for(let i=this.frames.length-1;i>=0;i--){if(this.frames[i].time<=t+.001){f=this.frames[i];break;}}}else f=this.frames[Math.min(this.frames.length-1,Math.floor(t*XDCAM_FRAME_RATE))];if(f)this.drawFrame(f.frame);return f;}
-  private tick():void{if(this.destroyed||this.status!=="playing")return;const t=this.currentTime;if(this.mode==="streaming"){this.evictFramesBefore(t-this.retainBehindSeconds);this.audioChunks=(this.audioChunks??[]).filter(chunk=>chunk.mediaEndTime>=t-.1);this.scheduledAudio=(this.scheduledAudio??[]).filter(range=>!range.ended&&range.mediaEndTime>=t-.1);if(this.streamAtEnd(t)){this.finishEnded();return;}const hasFuture=this.frames.some(frame=>frame.time>=t),hasAudio=this.audioReadyAt(t);if((!hasFuture||!hasAudio)&&t<this.durationValue){this.pausedAt=Math.min(t,this.durationValue);this.resumeAfterBuffer=true;cancelAnimationFrame(this.raf);this.raf=0;this.stopStreamingAudioSources();void this.audio?.suspend();this.setStatus("buffering");this.setBuffering(true);this.requestFill(this.pausedAt,true);this.requestAudioFill(this.pausedAt);return;}this.requestFill(t);this.requestAudioFill(t);}this.drawAt(t);this.emitTime(t);if(t>=this.durationValue){this.finishEnded();return;}this.raf=requestAnimationFrame(()=>this.tick());}
+  private tick():void{if(this.destroyed||this.status!=="playing")return;const t=this.currentTime;if(this.mode==="streaming"){this.evictPlayedMedia(t);if(this.streamAtEnd(t)){this.finishEnded();return;}const hasFuture=this.frames.some(frame=>frame.time>=t),hasAudio=this.audioReadyAt(t);if((!hasFuture||!hasAudio)&&t<this.durationValue){this.pausedAt=Math.min(t,this.durationValue);this.resumeAfterBuffer=true;cancelAnimationFrame(this.raf);this.raf=0;this.stopStreamingAudioSources();void this.audio?.suspend();this.setStatus("buffering");this.setBuffering(true);this.requestFill(this.pausedAt,true);this.requestAudioFill(this.pausedAt);return;}this.requestFill(t);this.requestAudioFill(t);}this.drawAt(t);this.emitTime(t);if(t>=this.durationValue){this.finishEnded();return;}this.raf=requestAnimationFrame(()=>this.tick());}
   destroy():void{this.destroyed=true;this.loadGeneration++;this.seekGeneration++;this.abortFill();this.invalidateStreamingVideoDecoder();this.setBuffering(false);this.loadController?.abort();this.seekController?.abort();cancelAnimationFrame(this.raf);this.raf=0;this.stopAudioSource();this.releaseReader();void this.audio?.close();this.audio=undefined;this.audioChunks=[];this.scheduledAudio=[];this.audioMediaAnchor=undefined;this.audioContextAnchor=undefined;this.clearFrames();this.videoDecoderClient?.dispose();}
 }

@@ -7,7 +7,7 @@ function moduleUrl(source: string): string {
 }
 
 describe("loadCustomLibAV", () => {
-  afterEach(() => vi.restoreAllMocks());
+  afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
   it("adds the requested URL to network failures", async () => {
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("network unavailable")));
@@ -35,16 +35,29 @@ describe("loadCustomLibAV", () => {
     expect(revokeObjectURL).toHaveBeenCalledWith(createObjectURL.mock.results[0].value);
   });
 
-  it("uses the asset base for LibAV and releases the Blob URL after import", async () => {
+  it("runs LibAV in-process against an absolute asset base and releases the Blob URL after import", async () => {
+    vi.stubGlobal("self", { location: { href: "https://player.example/app/index.html" } });
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("frontend source")));
     const loadedModule = moduleUrl("export async function LibAV(options) { return { options }; }");
     vi.spyOn(URL, "createObjectURL").mockReturnValue(loadedModule);
     const revokeObjectURL = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => undefined);
 
+    // The frontend is imported from a blob: URL, so a root-absolute base would not resolve there.
     await expect(loadCustomLibAV("/libav/")).resolves.toMatchObject({
-      options: { base: "/libav", noworker: false },
+      options: { base: "https://player.example/libav", noworker: true },
     });
     expect(revokeObjectURL).toHaveBeenCalledWith(loadedModule);
+  });
+
+  it("keeps an already absolute base so a separate asset CDN still resolves", async () => {
+    vi.stubGlobal("self", { location: { href: "https://player.example/app/index.html" } });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("frontend source")));
+    vi.spyOn(URL, "createObjectURL").mockReturnValue(moduleUrl("export async function LibAV(options) { return { options }; }"));
+    vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => undefined);
+
+    await expect(loadCustomLibAV("https://cdn.example/libav/")).resolves.toMatchObject({
+      options: { base: "https://cdn.example/libav" },
+    });
   });
 });
 
@@ -213,7 +226,7 @@ describe("PlayerEngine stale load suppression",()=>{
 });
 
 describe("PlayerEngine streaming mode",()=>{
-  afterEach(()=>{vi.unstubAllGlobals();vi.restoreAllMocks();});
+  afterEach(()=>{vi.useRealTimers();vi.unstubAllGlobals();vi.restoreAllMocks();});
   it("prebuffers six seconds before ready while keeping the random-access reader",async()=>{
     const readWhole=vi.fn(),destroy=vi.fn(),readRange=vi.fn().mockImplementation(async(_reader:any,_index:any,options:any)=>Array.from({length:options.endFrame-options.startFrame+1},(_,offset)=>({kind:"video",data:new Uint8Array([0,0,1,0xb3]),editUnit:options.startFrame+offset})));
     const callbacks={status:vi.fn(),ready:vi.fn(),time:vi.fn(),error:vi.fn(),mediaInfo:vi.fn(),timecode:vi.fn(),diagnostics:vi.fn()};
@@ -268,6 +281,25 @@ describe("PlayerEngine streaming mode",()=>{
     vi.stubGlobal("requestAnimationFrame",vi.fn(()=>1));vi.stubGlobal("cancelAnimationFrame",vi.fn());vi.spyOn(performance,"now").mockReturnValue(5000);
     const h=streamingPlaybackHarness();h.engine.frames=Array.from({length:70},(_,i)=>({frame:{width:2,height:2},time:i/10}));h.engine.requestFill=vi.fn();h.engine.tick();
     expect(h.engine.frames[0].time).toBeGreaterThanOrEqual(4);expect(h.engine.frames.length).toBeLessThanOrEqual(30);
+  });
+
+  it("evicts from the refill timer, so a hidden tab whose rAF is paused cannot grow the queue",()=>{
+    vi.useFakeTimers();
+    vi.stubGlobal("requestAnimationFrame",vi.fn(()=>1));vi.stubGlobal("cancelAnimationFrame",vi.fn());vi.spyOn(performance,"now").mockReturnValue(5000);
+    const h=streamingPlaybackHarness();
+    h.engine.frames=Array.from({length:70},(_,i)=>({frame:{width:2,height:2},time:i/10,mediaFrame:i}));
+    h.engine.audioChunks=[{mediaStartTime:0,mediaEndTime:1},{mediaStartTime:4.5,mediaEndTime:5.5}];
+    h.engine.requestFill=vi.fn();h.engine.requestAudioFill=vi.fn();
+    const tick=vi.spyOn(h.engine,"tick");
+
+    h.engine.scheduleRefillCheck();
+    vi.advanceTimersByTime(250);
+
+    expect(tick).not.toHaveBeenCalled();
+    expect(h.engine.frames).toHaveLength(30);
+    expect(h.engine.frames[0].time).toBe(4);
+    expect(h.engine.audioChunks.map((chunk:any)=>chunk.mediaEndTime)).toEqual([5.5]);
+    expect(h.engine.requestFill).toHaveBeenCalledWith(5);
   });
 
   it("enters buffering on exhaustion and freezes the media clock",()=>{
