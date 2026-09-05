@@ -43,6 +43,8 @@ export class WebGlRenderer {
   private yuvProgram:WebGLProgram;
   private rgbaTexture:WebGLTexture;
   private yuvTextures:[WebGLTexture,WebGLTexture,WebGLTexture];
+  private rgbaTextureSize?:{width:number;height:number};
+  private yuvTextureSize?:{width:number;height:number};
   constructor(private canvas: HTMLCanvasElement) {
     const gl = canvas.getContext("webgl", { alpha: false, antialias: false });
     if (!gl) throw new Error("WebGL is not available");
@@ -61,9 +63,11 @@ export class WebGlRenderer {
     const gl=this.gl;gl.viewport(0,0,width,height);
     if(isYuv422Frame(frame)){
       this.use(this.yuvProgram);const planes=[frame.y,frame.u,frame.v],names=["texY","texU","texV"];
-      for(let i=0;i<3;i++){gl.activeTexture(gl.TEXTURE0+i);gl.bindTexture(gl.TEXTURE_2D,this.yuvTextures[i]);gl.texImage2D(gl.TEXTURE_2D,0,gl.LUMINANCE,i===0?width:Math.ceil(width/2),height,0,gl.LUMINANCE,gl.UNSIGNED_BYTE,planes[i]);gl.uniform1i(gl.getUniformLocation(this.yuvProgram,names[i]),i);}
+      const allocate=!this.yuvTextureSize||this.yuvTextureSize.width!==width||this.yuvTextureSize.height!==height;
+      for(let i=0;i<3;i++){gl.activeTexture(gl.TEXTURE0+i);gl.bindTexture(gl.TEXTURE_2D,this.yuvTextures[i]);const planeWidth=i===0?width:Math.ceil(width/2);if(allocate)gl.texImage2D(gl.TEXTURE_2D,0,gl.LUMINANCE,planeWidth,height,0,gl.LUMINANCE,gl.UNSIGNED_BYTE,planes[i]);else gl.texSubImage2D(gl.TEXTURE_2D,0,0,0,planeWidth,height,gl.LUMINANCE,gl.UNSIGNED_BYTE,planes[i]);gl.uniform1i(gl.getUniformLocation(this.yuvProgram,names[i]),i);}
+      this.yuvTextureSize={width,height};
     }else{
-      this.use(this.rgbaProgram);gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,this.rgbaTexture);gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,frame);gl.uniform1i(gl.getUniformLocation(this.rgbaProgram,"tex"),0);
+      this.use(this.rgbaProgram);gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,this.rgbaTexture);if(!this.rgbaTextureSize||this.rgbaTextureSize.width!==width||this.rgbaTextureSize.height!==height){gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,frame);this.rgbaTextureSize={width,height};}else gl.texSubImage2D(gl.TEXTURE_2D,0,0,0,gl.RGBA,gl.UNSIGNED_BYTE,frame);gl.uniform1i(gl.getUniformLocation(this.rgbaProgram,"tex"),0);
     }
     gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
   }
