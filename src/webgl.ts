@@ -10,6 +10,10 @@ export interface Yuv422Frame {
   v: Uint8Array;
 }
 
+function isYuv422Frame(frame: TexImageSource | Yuv422Frame): frame is Yuv422Frame {
+  return "u" in frame && "v" in frame && frame.y instanceof Uint8Array && frame.u instanceof Uint8Array && frame.v instanceof Uint8Array;
+}
+
 function shader(gl: WebGLRenderingContext, type: number, source: string): WebGLShader {
   const value = gl.createShader(type)!;
   gl.shaderSource(value, source); gl.compileShader(value);
@@ -55,7 +59,7 @@ export class WebGlRenderer {
   draw(frame: TexImageSource|Yuv422Frame, width: number, height: number): void {
     if(this.canvas.width!==width||this.canvas.height!==height){this.canvas.width=width;this.canvas.height=height;}
     const gl=this.gl;gl.viewport(0,0,width,height);
-    if("y" in frame){
+    if(isYuv422Frame(frame)){
       this.use(this.yuvProgram);const planes=[frame.y,frame.u,frame.v],names=["texY","texU","texV"];
       for(let i=0;i<3;i++){gl.activeTexture(gl.TEXTURE0+i);gl.bindTexture(gl.TEXTURE_2D,this.yuvTextures[i]);gl.texImage2D(gl.TEXTURE_2D,0,gl.LUMINANCE,i===0?width:Math.ceil(width/2),height,0,gl.LUMINANCE,gl.UNSIGNED_BYTE,planes[i]);gl.uniform1i(gl.getUniformLocation(this.yuvProgram,names[i]),i);}
     }else{
