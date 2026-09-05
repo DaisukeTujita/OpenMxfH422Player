@@ -1,0 +1,9 @@
+name: Claude Code Issue Handler
+
+on:
+  issues:
+    types: [opened, labeled]
+
+jobs:
+  claude-code:
+    if: contains(github.event.issue.labels.*.name, 'claude') || github.event.action == 'opened'
