@@ -248,23 +248,24 @@ describe("PlayerEngine stale load suppression",()=>{
 
 describe("PlayerEngine streaming mode",()=>{
   afterEach(()=>{vi.unstubAllGlobals();vi.restoreAllMocks();});
-  it("keeps the reader, avoids readWhole, and starts background prefetch after the initial range",async()=>{
+  it("prebuffers six seconds before ready while keeping the random-access reader",async()=>{
     const readWhole=vi.fn(),destroy=vi.fn(),readRange=vi.fn().mockResolvedValue([{kind:"video",data:new Uint8Array([0,0,1,0xb3]),editUnit:0}]);
     const callbacks={status:vi.fn(),ready:vi.fn(),time:vi.fn(),error:vi.fn(),mediaInfo:vi.fn(),timecode:vi.fn(),diagnostics:vi.fn()};
     const engine=Object.create(PlayerEngine.prototype) as any;
-    Object.assign(engine,{callbacks,renderer:{draw:vi.fn()},mode:"streaming",frames:[],loadGeneration:0,seekGeneration:0,destroyed:false,videoAheadSeconds:4,retainBehindSeconds:1,refillThresholdSeconds:2,chunkSeconds:3,maxReadSize:1024,dependencies:{
+    Object.assign(engine,{callbacks,renderer:{draw:vi.fn()},mode:"streaming",frames:[],loadGeneration:0,seekGeneration:0,destroyed:false,videoAheadSeconds:6,retainBehindSeconds:1,refillThresholdSeconds:4,chunkSeconds:3,maxReadSize:1024,dependencies:{
       createReader:()=>({size:1000n,read:vi.fn(),destroy,getStats:()=>({bytesLoaded:20n,underlyingReadCount:2,cachedBytes:10})}),
       parseMetadata:async()=>({mediaInfo:{operationalPattern:"OP1a",essenceContainer:"060e2b34",video:{width:1920,height:1080},durationFrames:300,timecodeTrackCount:0,indexTableCount:0,indexEntryCount:0},timecodes:[],indexTables:[],partitions:[{offset:0n,kind:"header"}]}),
-      indexEssence:async()=>({frameRate:30,partitions:[],packets:[{kind:"video",editUnit:0}]}),readRange,readWhole,parse:vi.fn(),loadLibav:async()=>({libavjs_with_swscale:async()=>1})
+      indexEssence:async()=>({frameRate:30,partitions:[],packets:Array.from({length:300},(_,editUnit)=>({kind:"video",editUnit}))}),readRange,readWhole,parse:vi.fn(),loadLibav:async()=>({libavjs_with_swscale:async()=>1})
     }});
     engine.decodeStreamingVideo=async()=>[{frame:{width:2,height:2},time:0,mediaFrame:0}];
     engine.requestFill=vi.fn();engine.requestAudioFill=vi.fn();
     await engine.load(new Blob([new Uint8Array(1000)]));
     expect(readWhole).not.toHaveBeenCalled();
-    expect(readRange).toHaveBeenCalledWith(expect.anything(),expect.anything(),expect.objectContaining({startFrame:0,endFrame:89,maxReadSize:1024,kinds:["video"]}));
+    expect(readRange).toHaveBeenNthCalledWith(1,expect.anything(),expect.anything(),expect.objectContaining({startFrame:0,endFrame:89,maxReadSize:1024,kinds:["video"]}));
+    expect(readRange).toHaveBeenNthCalledWith(2,expect.anything(),expect.anything(),expect.objectContaining({startFrame:45,endFrame:179,maxReadSize:1024,kinds:["video"]}));
     expect(destroy).not.toHaveBeenCalled();
     expect(callbacks.ready).toHaveBeenCalledOnce();
-    expect(engine.requestFill).toHaveBeenCalledWith(0,true);
+    expect(engine.requestFill).toHaveBeenCalledWith(0);
     expect(engine.requestAudioFill).toHaveBeenCalledWith(0);
     expect(callbacks.timecode).toHaveBeenCalledWith(null);
     expect(callbacks.error).not.toHaveBeenCalled();
@@ -275,13 +276,13 @@ describe("PlayerEngine streaming mode",()=>{
   function streamingPlaybackHarness(){
     const callbacks={status:vi.fn(),ready:vi.fn(),time:vi.fn(),error:vi.fn(),seeking:vi.fn(),buffering:vi.fn(),diagnostics:vi.fn(),timecode:vi.fn()};
     const engine=Object.create(PlayerEngine.prototype) as any;
-    Object.assign(engine,{callbacks,renderer:{draw:vi.fn()},mode:"streaming",status:"playing",frames:[],loadGeneration:1,seekGeneration:1,destroyed:false,videoAheadSeconds:4,retainBehindSeconds:1,refillThresholdSeconds:2,chunkSeconds:3,maxReadSize:1024,durationValue:200,startedAt:0,pausedAt:0,queuedThroughFrame:-1,videoCodecId:2,essenceIndex:{frameRate:10,packets:[]},reader:{},libav:{},raf:0,buffering:false,resumeAfterBuffer:false});
+    Object.assign(engine,{callbacks,renderer:{draw:vi.fn()},mode:"streaming",status:"playing",frames:[],loadGeneration:1,seekGeneration:1,destroyed:false,videoAheadSeconds:6,retainBehindSeconds:1,refillThresholdSeconds:4,chunkSeconds:3,maxReadSize:1024,durationValue:200,startedAt:0,pausedAt:0,queuedThroughFrame:-1,videoCodecId:2,essenceIndex:{frameRate:10,packets:[]},reader:{},libav:{},raf:0,buffering:false,resumeAfterBuffer:false});
     return {engine,callbacks};
   }
 
-  it("deduplicates background fills and uses the four-second ahead target",async()=>{
+  it("deduplicates background fills while using the six-second ahead target",async()=>{
     const h=streamingPlaybackHarness(),release=gate();let calls=0;
-    h.engine.fillStreaming=vi.fn(async()=>{calls++;release.open();await release.wait;h.engine.frames=[{frame:{width:2,height:2},time:5}];h.engine.queuedThroughFrame=50;return true;});
+    h.engine.fillStreaming=vi.fn(async()=>{calls++;release.open();await release.wait;h.engine.frames=[{frame:{width:2,height:2},time:7}];h.engine.queuedThroughFrame=70;return true;});
     h.engine.requestFill(0);h.engine.requestFill(0);await release.entered;expect(calls).toBe(1);release.release();await Promise.resolve();await Promise.resolve();
     expect(h.engine.fillStreaming).toHaveBeenCalledTimes(1);
   });
