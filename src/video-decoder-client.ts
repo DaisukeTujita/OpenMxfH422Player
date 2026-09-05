@@ -3,8 +3,8 @@ import { toDecodeResult, type DecodeResult, type WireDecodeResult, type WorkerRe
 
 export interface VideoDecoderClient {
   init(base: string): Promise<void>;
-  decodeVideo(chunks: Uint8Array[], codecId: number, mediaFrames: number[], frameRate: number, videoRenderMode: VideoRenderMode): Promise<DecodeResult>;
-  decodeStreamingVideo(chunks: Uint8Array[], mediaFrames: number[], frameRate: number, flush: boolean, loadGeneration: number, seekGeneration: number, codecId: number, videoRenderMode: VideoRenderMode, maxMediaFrame: number): Promise<DecodeResult>;
+  decodeVideo(chunks: Uint8Array[], codecId: number, mediaFrames: number[], frameRate: number, videoRenderMode: VideoRenderMode, recycle?: ArrayBuffer[]): Promise<DecodeResult>;
+  decodeStreamingVideo(chunks: Uint8Array[], mediaFrames: number[], frameRate: number, flush: boolean, loadGeneration: number, seekGeneration: number, codecId: number, videoRenderMode: VideoRenderMode, maxMediaFrame: number, recycle?: ArrayBuffer[]): Promise<DecodeResult>;
   invalidateStreaming(): void;
   dispose(): void;
 }
@@ -41,20 +41,21 @@ export function createWorkerVideoDecoderClient(): VideoDecoderClient {
     pending.clear();
   };
 
-  function send<T>(request: WorkerRequestPayload): Promise<T> {
+  // Recycled buffers are transferred, never cloned: a chunk's worth of planes is hundreds of megabytes.
+  function send<T>(request: WorkerRequestPayload, transfer: ArrayBuffer[] = []): Promise<T> {
     const id = nextId++;
     return new Promise<T>((resolve, reject) => {
       pending.set(id, { resolve: resolve as (value: unknown) => void, reject });
-      worker.postMessage({ ...request, id } as WorkerRequest);
+      worker.postMessage({ ...request, id } as WorkerRequest, transfer);
     });
   }
 
   return {
     init: base => send({ type: "init", base }),
-    decodeVideo: (chunks, codecId, mediaFrames, frameRate, videoRenderMode) =>
-      send<WireDecodeResult>({ type: "decode-legacy", chunks, codecId, mediaFrames, frameRate, videoRenderMode }).then(toDecodeResult),
-    decodeStreamingVideo: (chunks, mediaFrames, frameRate, flush, loadGeneration, seekGeneration, codecId, videoRenderMode, maxMediaFrame) =>
-      send<WireDecodeResult>({ type: "decode-streaming", chunks, mediaFrames, frameRate, flush, loadGeneration, seekGeneration, codecId, videoRenderMode, maxMediaFrame }).then(toDecodeResult),
+    decodeVideo: (chunks, codecId, mediaFrames, frameRate, videoRenderMode, recycle = []) =>
+      send<WireDecodeResult>({ type: "decode-legacy", chunks, codecId, mediaFrames, frameRate, videoRenderMode, recycle }, recycle).then(toDecodeResult),
+    decodeStreamingVideo: (chunks, mediaFrames, frameRate, flush, loadGeneration, seekGeneration, codecId, videoRenderMode, maxMediaFrame, recycle = []) =>
+      send<WireDecodeResult>({ type: "decode-streaming", chunks, mediaFrames, frameRate, flush, loadGeneration, seekGeneration, codecId, videoRenderMode, maxMediaFrame, recycle }, recycle).then(toDecodeResult),
     invalidateStreaming: () => { void send({ type: "invalidate-streaming" }).catch(() => undefined); },
     dispose: () => { void send({ type: "dispose" }).catch(() => undefined); worker.terminate(); },
   };

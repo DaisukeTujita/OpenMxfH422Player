@@ -2,6 +2,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { loadCustomLibAV, PlayerEngine, selectTimecodeTrack } from "./engine";
 
+/** Minimal but structurally real planar frame: the engine reads its plane buffers when recycling. */
+function planarFrame() {
+  return { kind: "yuv422p" as const, width: 2, height: 2, y: new Uint8Array(4), u: new Uint8Array(2), v: new Uint8Array(2) };
+}
+
 function moduleUrl(source: string): string {
   return `data:text/javascript,${encodeURIComponent(source)}`;
 }
@@ -103,7 +108,7 @@ describe("PlayerEngine decodeVideo/decodeStreamingVideo delegate to the video de
     const engine = Object.create(PlayerEngine.prototype) as any;
     Object.assign(engine, { dependencies: { createVideoDecoder: () => client }, loadGeneration: 1, seekGeneration: 2, videoRenderMode: "yuv-webgl", videoCodecId: 2, durationValue: 10, videoDecodeMs: 0, videoColorConvertMs: 0, videoDecodedFrames: 0, adaptiveVideoAheadSeconds: 6, adaptiveRefillThresholdSeconds: 4, videoAheadSeconds: 6, refillThresholdSeconds: 4, chunkSeconds: 3 });
     await engine.decodeStreamingVideo([new Uint8Array([1])], [0], 30, false, 1, 2);
-    expect(client.decodeStreamingVideo).toHaveBeenCalledWith([new Uint8Array([1])], [0], 30, false, 1, 2, 2, "yuv-webgl", 300);
+    expect(client.decodeStreamingVideo).toHaveBeenCalledWith([new Uint8Array([1])], [0], 30, false, 1, 2, 2, "yuv-webgl", 300, []);
     expect(engine.streamingDecoderGeneration).toEqual({ loadGeneration: 1, seekGeneration: 2 });
   });
 
@@ -134,7 +139,7 @@ describe("PlayerEngine decodeVideo/decodeStreamingVideo delegate to the video de
 describe("PlayerEngine drawAt", () => {
   it("returns the last streaming frame at or before the requested time without mutating the queue",()=>{
     const engine=Object.create(PlayerEngine.prototype) as any;
-    const frames=[{frame:{width:2,height:2},time:0,mediaFrame:0},{frame:{width:2,height:2},time:1,mediaFrame:30},{frame:{width:2,height:2},time:2,mediaFrame:60}];
+    const frames=[{frame:planarFrame(),time:0,mediaFrame:0},{frame:planarFrame(),time:1,mediaFrame:30},{frame:planarFrame(),time:2,mediaFrame:60}];
     Object.assign(engine,{mode:"streaming",essenceIndex:{frameRate:30},frames,renderer:{draw:vi.fn()}});
     const result=engine.drawAt(1.5);
     expect(result.mediaFrame).toBe(30);
@@ -143,7 +148,7 @@ describe("PlayerEngine drawAt", () => {
   });
   it("returns undefined when no frame is at or before the requested time",()=>{
     const engine=Object.create(PlayerEngine.prototype) as any;
-    Object.assign(engine,{mode:"streaming",essenceIndex:{frameRate:30},frames:[{frame:{width:2,height:2},time:5,mediaFrame:150}],renderer:{draw:vi.fn()}});
+    Object.assign(engine,{mode:"streaming",essenceIndex:{frameRate:30},frames:[{frame:planarFrame(),time:5,mediaFrame:150}],renderer:{draw:vi.fn()}});
     expect(engine.drawAt(1)).toBeUndefined();
   });
 });
@@ -154,7 +159,7 @@ describe("PlayerEngine video prefetch pipelining", () => {
     const client={
       init:async()=>undefined,
       decodeVideo:async()=>({frames:[],decodeMs:0,convertMs:0}),
-      decodeStreamingVideo:async(chunks:Uint8Array[],mediaFrames:number[],frameRate:number)=>({frames:mediaFrames.map(mediaFrame=>({frame:{width:2,height:2},time:mediaFrame/frameRate,mediaFrame})),decodeMs:0,convertMs:0}),
+      decodeStreamingVideo:async(chunks:Uint8Array[],mediaFrames:number[],frameRate:number)=>({frames:mediaFrames.map(mediaFrame=>({frame:planarFrame(),time:mediaFrame/frameRate,mediaFrame})),decodeMs:0,convertMs:0}),
       invalidateStreaming:()=>{},dispose:()=>{},
     };
     const engine=Object.create(PlayerEngine.prototype) as any;
@@ -229,7 +234,7 @@ function lifecycleHarness(block:"metadata"|"video"|"audio") {
     readWhole:async(blob:Blob)=>new Uint8Array([blob.size]),parse:(bytes:Uint8Array)=>({packets:[{kind:"video",trackNumber:1,bodyOffset:0,data:new Uint8Array([bytes[0]])},{kind:"audio",trackNumber:1,bodyOffset:0,data:new Uint8Array([bytes[0],0,0,bytes[0],0,0])}],operationalPattern:"OP1a",isXdcamHd422:true,videoCodec:{codecId:2,codecName:"mpeg2video"},audioCodec:{codecId:65549,codecName:"pcm_s24be"}}),
     createVideoDecoder:()=>({init:async()=>undefined,decodeVideo:async()=>({frames:[],decodeMs:0,convertMs:0}),decodeStreamingVideo:async()=>({frames:[],decodeMs:0,convertMs:0}),invalidateStreaming:()=>{},dispose:()=>{}}),
   }});
-  engine.decodeVideo=async(chunks:Uint8Array[])=>{if(chunks[0][0]===1&&block==="video"){pause.open();await pause.wait;}return [{frame:{width:2,height:2},time:0}];};
+  engine.decodeVideo=async(chunks:Uint8Array[])=>{if(chunks[0][0]===1&&block==="video"){pause.open();await pause.wait;}return [{frame:planarFrame(),time:0}];};
   engine.preparePcm=async(chunks:Uint8Array[])=>{if(chunks[0][0]===1&&block==="audio"){pause.open();await pause.wait;}return {audio:{close:vi.fn()},audioBuffer:{}};};
   return {engine,callbacks,events,pause,destroyedReaders};
 }
@@ -250,7 +255,7 @@ describe("PlayerEngine streaming mode",()=>{
       parseMetadata:async()=>({mediaInfo:{operationalPattern:"OP1a",essenceContainer:"060e2b34",video:{width:1920,height:1080},durationFrames:300,timecodeTrackCount:0,indexTableCount:0,indexEntryCount:0},timecodes:[],indexTables:[],partitions:[{offset:0n,kind:"header"}]}),
       indexEssence:async()=>({frameRate:30,partitions:[],packets:Array.from({length:300},(_,editUnit)=>({kind:"video",editUnit}))}),readRange,readWhole,parse:vi.fn(),createVideoDecoder:()=>({init:async()=>undefined,decodeVideo:async()=>({frames:[],decodeMs:0,convertMs:0}),decodeStreamingVideo:async()=>({frames:[],decodeMs:0,convertMs:0}),invalidateStreaming:()=>{},dispose:()=>{}})
     }});
-    engine.decodeStreamingVideo=async(_chunks:any[],mediaFrames:number[],frameRate:number)=>mediaFrames.map(mediaFrame=>({frame:{width:2,height:2},time:mediaFrame/frameRate,mediaFrame}));
+    engine.decodeStreamingVideo=async(_chunks:any[],mediaFrames:number[],frameRate:number)=>mediaFrames.map(mediaFrame=>({frame:planarFrame(),time:mediaFrame/frameRate,mediaFrame}));
     engine.requestFill=vi.fn();engine.requestAudioFill=vi.fn();
     await engine.load(new Blob([new Uint8Array(1000)]));
     expect(readWhole).not.toHaveBeenCalled();
@@ -276,7 +281,7 @@ describe("PlayerEngine streaming mode",()=>{
 
   it("deduplicates background fills while using the six-second ahead target",async()=>{
     const h=streamingPlaybackHarness(),release=gate();let calls=0;
-    h.engine.fillStreaming=vi.fn(async()=>{calls++;release.open();await release.wait;h.engine.frames=[{frame:{width:2,height:2},time:7}];h.engine.queuedThroughFrame=70;return true;});
+    h.engine.fillStreaming=vi.fn(async()=>{calls++;release.open();await release.wait;h.engine.frames=[{frame:planarFrame(),time:7}];h.engine.queuedThroughFrame=70;return true;});
     h.engine.requestFill(0);h.engine.requestFill(0);await release.entered;expect(calls).toBe(1);release.release();await Promise.resolve();await Promise.resolve();
     expect(h.engine.fillStreaming).toHaveBeenCalledTimes(1);
   });
@@ -284,7 +289,7 @@ describe("PlayerEngine streaming mode",()=>{
   it("continues at the next edit unit without rereading GOP preroll",async()=>{
     const h=streamingPlaybackHarness(),readRange=vi.fn().mockResolvedValue([{kind:"video",editUnit:90,data:new Uint8Array([1])}]);
     h.engine.durationValue=10;h.engine.queuedThroughFrame=89;h.engine.dependencies={readRange};h.engine.streamingDecoderGeneration={loadGeneration:1,seekGeneration:1};
-    h.engine.decodeStreamingVideo=vi.fn().mockResolvedValue([{frame:{width:2,height:2},time:8.9,mediaFrame:89},{frame:{width:2,height:2},time:9,mediaFrame:90}]);h.engine.publishDiagnostics=vi.fn();
+    h.engine.decodeStreamingVideo=vi.fn().mockResolvedValue([{frame:planarFrame(),time:8.9,mediaFrame:89},{frame:planarFrame(),time:9,mediaFrame:90}]);h.engine.publishDiagnostics=vi.fn();
     await h.engine.fillStreaming(90,new AbortController().signal,1,1);
     expect(readRange).toHaveBeenCalledWith(h.engine.reader,h.engine.essenceIndex,expect.objectContaining({startFrame:90,endFrame:99,kinds:["video"]}));
     expect(h.engine.decodeStreamingVideo).toHaveBeenCalledWith(expect.any(Array),[90],10,true,1,1);
@@ -293,7 +298,7 @@ describe("PlayerEngine streaming mode",()=>{
 
   it("evicts played frames according to retainBehindSeconds without growing the queue",()=>{
     vi.stubGlobal("requestAnimationFrame",vi.fn(()=>1));vi.stubGlobal("cancelAnimationFrame",vi.fn());vi.spyOn(performance,"now").mockReturnValue(5000);
-    const h=streamingPlaybackHarness();h.engine.frames=Array.from({length:70},(_,i)=>({frame:{width:2,height:2},time:i/10}));h.engine.requestFill=vi.fn();h.engine.tick();
+    const h=streamingPlaybackHarness();h.engine.frames=Array.from({length:70},(_,i)=>({frame:planarFrame(),time:i/10}));h.engine.requestFill=vi.fn();h.engine.tick();
     expect(h.engine.frames[0].time).toBeGreaterThanOrEqual(4);expect(h.engine.frames.length).toBeLessThanOrEqual(30);
   });
 
@@ -301,7 +306,7 @@ describe("PlayerEngine streaming mode",()=>{
     vi.useFakeTimers();
     vi.stubGlobal("requestAnimationFrame",vi.fn(()=>1));vi.stubGlobal("cancelAnimationFrame",vi.fn());vi.spyOn(performance,"now").mockReturnValue(5000);
     const h=streamingPlaybackHarness();
-    h.engine.frames=Array.from({length:70},(_,i)=>({frame:{width:2,height:2},time:i/10,mediaFrame:i}));
+    h.engine.frames=Array.from({length:70},(_,i)=>({frame:planarFrame(),time:i/10,mediaFrame:i}));
     h.engine.audioChunks=[{mediaStartTime:0,mediaEndTime:1},{mediaStartTime:4.5,mediaEndTime:5.5}];
     h.engine.requestFill=vi.fn();h.engine.requestAudioFill=vi.fn();
     const tick=vi.spyOn(h.engine,"tick");
@@ -316,15 +321,33 @@ describe("PlayerEngine streaming mode",()=>{
     expect(h.engine.requestFill).toHaveBeenCalledWith(5);
   });
 
+  it("returns the planes of evicted frames to the decoder with the next chunk",async()=>{
+    vi.stubGlobal("requestAnimationFrame",vi.fn(()=>1));vi.stubGlobal("cancelAnimationFrame",vi.fn());vi.spyOn(performance,"now").mockReturnValue(5000);
+    const h=streamingPlaybackHarness();
+    const client={init:vi.fn(),decodeVideo:vi.fn(),decodeStreamingVideo:vi.fn().mockResolvedValue({frames:[],decodeMs:1,convertMs:0,pooledFrames:7}),invalidateStreaming:vi.fn(),dispose:vi.fn()};
+    h.engine.dependencies={createVideoDecoder:()=>client};h.engine.videoRenderMode="yuv-webgl";h.engine.durationValue=10;
+    const evicted=[planarFrame(),planarFrame()];
+    h.engine.frames=[{frame:evicted[0],time:0,mediaFrame:0},{frame:evicted[1],time:1,mediaFrame:10},{frame:planarFrame(),time:4.5,mediaFrame:45}];
+
+    h.engine.evictPlayedMedia(5);
+    await h.engine.decodeStreamingVideo([new Uint8Array([1])],[50],10,false,1,1);
+
+    const recycled=client.decodeStreamingVideo.mock.calls[0].at(-1);
+    expect(recycled).toEqual(evicted.flatMap(frame=>[frame.y.buffer,frame.u.buffer,frame.v.buffer]));
+    // Staged buffers are handed over exactly once.
+    expect(h.engine.takeRecyclableBuffers()).toEqual([]);
+    expect(h.engine.getDiagnostics().pooledVideoFrames).toBe(7);
+  });
+
   it("enters buffering on exhaustion and freezes the media clock",()=>{
     vi.stubGlobal("requestAnimationFrame",vi.fn(()=>1));vi.stubGlobal("cancelAnimationFrame",vi.fn());vi.spyOn(performance,"now").mockReturnValue(5000);
-    const h=streamingPlaybackHarness();h.engine.frames=[{frame:{width:2,height:2},time:3}];h.engine.requestFill=vi.fn();h.engine.tick();
+    const h=streamingPlaybackHarness();h.engine.frames=[{frame:planarFrame(),time:3}];h.engine.requestFill=vi.fn();h.engine.tick();
     expect(h.engine.status).toBe("buffering");expect(h.engine.pausedAt).toBe(5);expect(h.callbacks.buffering).toHaveBeenCalledWith(true);vi.spyOn(performance,"now").mockReturnValue(9000);expect(h.engine.currentTime).toBe(5);
   });
 
   it("aborts a normal fill when seeking and only resumes from the seek target",async()=>{
     vi.stubGlobal("requestAnimationFrame",vi.fn(()=>1));vi.stubGlobal("cancelAnimationFrame",vi.fn());vi.spyOn(performance,"now").mockReturnValue(1000);
-    const h=streamingPlaybackHarness(),old=new AbortController();h.engine.fillController=old;h.engine.filling=new Promise(()=>{});h.engine.fillStreaming=vi.fn(async(start:number)=>{h.engine.frames=[{frame:{width:2,height:2},time:start/10,mediaFrame:start}];h.engine.queuedThroughFrame=start+29;return true;});
+    const h=streamingPlaybackHarness(),old=new AbortController();h.engine.fillController=old;h.engine.filling=new Promise(()=>{});h.engine.fillStreaming=vi.fn(async(start:number)=>{h.engine.frames=[{frame:planarFrame(),time:start/10,mediaFrame:start}];h.engine.queuedThroughFrame=start+29;return true;});
     await h.engine.seek(100);expect(old.signal.aborted).toBe(true);expect(h.engine.fillStreaming.mock.calls[0][0]).toBe(1000);expect(h.engine.renderer.draw).toHaveBeenCalledWith(expect.objectContaining({width:2}),2,2);expect(h.engine.frames.every((frame:any)=>frame.time>=100)).toBe(true);expect(h.engine.status).toBe("playing");expect(h.callbacks.seeking).toHaveBeenLastCalledWith(false);
   });
 
@@ -335,7 +358,7 @@ describe("PlayerEngine streaming mode",()=>{
     h.engine.timecodeInfo={startFrame:0,roundedTimecodeBase:30,dropFrame:false,editRateNumerator:30,editRateDenominator:1};h.engine.reader={destroy:vi.fn(),getStats:()=>({bytesLoaded:123n})};
     const packets=Array.from({length:41},(_,i)=>({kind:"video",editUnit:90+i,data:new Uint8Array([i]),valueOffset:0n,valueLength:1n,offset:0n,trackNumber:1,presentationTime:(90+i)/30}));
     h.engine.dependencies={readRange:vi.fn(async(_reader:any,_index:any,options:any)=>{expect(options).toMatchObject({startFrame:90,prerollFrames:0});expect(options.endFrame).toBeGreaterThanOrEqual(100);return packets.filter(packet=>packet.editUnit<=options.endFrame);})};
-    const decodedInputs:number[][]=[];h.engine.decodeStreamingVideo=vi.fn(async(_chunks:any,mediaFrames:number[])=>{decodedInputs.push(mediaFrames);return mediaFrames.map(mediaFrame=>({frame:{width:2,height:2},time:mediaFrame/30,mediaFrame}));});
+    const decodedInputs:number[][]=[];h.engine.decodeStreamingVideo=vi.fn(async(_chunks:any,mediaFrames:number[])=>{decodedInputs.push(mediaFrames);return mediaFrames.map(mediaFrame=>({frame:planarFrame(),time:mediaFrame/30,mediaFrame}));});
     h.engine.fillStreamingAudio=vi.fn(async(mediaTime:number)=>{expect(mediaTime).toBe(100/30);return true;});
     await h.engine.seekTimecode("00:00:03:10");
     expect(decodedInputs[0][0]).toBe(90);expect(decodedInputs[0]).toContain(100);expect(h.engine.frames[0].mediaFrame).toBe(100);expect(h.engine.frames.some((frame:any)=>frame.mediaFrame<100)).toBe(false);
@@ -344,7 +367,7 @@ describe("PlayerEngine streaming mode",()=>{
 
   it("fails strict timecode seek when the requested decoded frame is absent",async()=>{
     vi.stubGlobal("cancelAnimationFrame",vi.fn());const h=streamingPlaybackHarness();h.engine.status="paused";h.engine.durationValue=10;h.engine.essenceIndex={frameRate:30,packets:[]};h.engine.indexTables=[];h.engine.reader={destroy:vi.fn()};h.engine.timecodeInfo={startFrame:0,roundedTimecodeBase:30,dropFrame:false,editRateNumerator:30,editRateDenominator:1};
-    h.engine.fillStreaming=vi.fn(async()=>{h.engine.frames=[{frame:{width:2,height:2},time:99/30,mediaFrame:99}];return true;});h.engine.fillStreamingAudio=vi.fn(async()=>true);
+    h.engine.fillStreaming=vi.fn(async()=>{h.engine.frames=[{frame:planarFrame(),time:99/30,mediaFrame:99}];return true;});h.engine.fillStreamingAudio=vi.fn(async()=>true);
     await expect(h.engine.seekTimecode("00:00:03:10")).rejects.toThrow("Requested frame 100 was not decoded");expect(h.engine.requestedTimecode).not.toBe("00:00:03:10");expect(h.callbacks.error).toHaveBeenCalled();
   });
 
@@ -361,7 +384,7 @@ describe("PlayerEngine streaming mode",()=>{
   });
 
   it("uses sequential fallback decode start when no Index Table exists",async()=>{
-    vi.stubGlobal("cancelAnimationFrame",vi.fn());const h=streamingPlaybackHarness();h.engine.status="paused";h.engine.indexTables=[];h.engine.fillStreaming=vi.fn(async(target:number,_signal:any,_load:any,_seek:any,start:number)=>{expect(target).toBe(100);expect(start).toBe(0);h.engine.frames=[{frame:{width:2,height:2},time:10,mediaFrame:100}];return true;});h.engine.fillStreamingAudio=vi.fn(async()=>true);
+    vi.stubGlobal("cancelAnimationFrame",vi.fn());const h=streamingPlaybackHarness();h.engine.status="paused";h.engine.indexTables=[];h.engine.fillStreaming=vi.fn(async(target:number,_signal:any,_load:any,_seek:any,start:number)=>{expect(target).toBe(100);expect(start).toBe(0);h.engine.frames=[{frame:planarFrame(),time:10,mediaFrame:100}];return true;});h.engine.fillStreamingAudio=vi.fn(async()=>true);
     await h.engine.seek(10);expect(h.engine.seekSource).toBe("sequential-fallback");expect(h.engine.actualDisplayedFrame).toBe(100);
   });
 
@@ -371,12 +394,12 @@ describe("PlayerEngine streaming mode",()=>{
 
   it("ends once when the last frame is one frame before duration",()=>{
     vi.stubGlobal("requestAnimationFrame",vi.fn(()=>1));vi.stubGlobal("cancelAnimationFrame",vi.fn());vi.spyOn(performance,"now").mockReturnValue(9967);
-    const h=streamingPlaybackHarness();h.engine.durationValue=10;h.engine.essenceIndex={frameRate:30,packets:[{kind:"video",editUnit:299}]};h.engine.queuedThroughFrame=299;h.engine.frames=[{frame:{width:2,height:2},time:299/30}];h.engine.requestFill=vi.fn();h.engine.tick();h.engine.tick();
+    const h=streamingPlaybackHarness();h.engine.durationValue=10;h.engine.essenceIndex={frameRate:30,packets:[{kind:"video",editUnit:299}]};h.engine.queuedThroughFrame=299;h.engine.frames=[{frame:planarFrame(),time:299/30}];h.engine.requestFill=vi.fn();h.engine.tick();h.engine.tick();
     expect(h.engine.status).toBe("ended");expect(h.engine.pausedAt).toBe(10);expect(h.engine.requestFill).not.toHaveBeenCalled();expect(h.callbacks.status.mock.calls.filter((call:any[])=>call[0]==="ended")).toHaveLength(1);expect(h.callbacks.time).toHaveBeenLastCalledWith(10);expect(h.callbacks.timecode).toHaveBeenLastCalledWith(null);expect(h.callbacks.buffering).not.toHaveBeenCalledWith(true);
   });
 
   it("moves the current generation to error when a background fill fails",async()=>{
-    vi.stubGlobal("cancelAnimationFrame",vi.fn());const h=streamingPlaybackHarness(),destroy=vi.fn();h.engine.reader={destroy};h.engine.frames=[{frame:{width:2,height:2},time:0}];h.engine.buffering=true;h.engine.fillStreaming=vi.fn().mockRejectedValue(new Error("read failed"));h.engine.requestFill(0);await Promise.resolve();await Promise.resolve();
+    vi.stubGlobal("cancelAnimationFrame",vi.fn());const h=streamingPlaybackHarness(),destroy=vi.fn();h.engine.reader={destroy};h.engine.frames=[{frame:planarFrame(),time:0}];h.engine.buffering=true;h.engine.fillStreaming=vi.fn().mockRejectedValue(new Error("read failed"));h.engine.requestFill(0);await Promise.resolve();await Promise.resolve();
     expect(h.engine.status).toBe("error");expect(h.callbacks.error).toHaveBeenCalledWith(expect.objectContaining({message:"read failed"}));expect(h.callbacks.buffering).toHaveBeenCalledWith(false);expect(h.engine.resumeAfterBuffer).toBe(false);expect(destroy).toHaveBeenCalledOnce();expect(h.engine.reader).toBeUndefined();expect(h.engine.frames).toEqual([]);
   });
 
@@ -392,7 +415,7 @@ describe("PlayerEngine streaming mode",()=>{
 
   it("treats an aborted stale seek as a successful cancellation",async()=>{
     vi.stubGlobal("requestAnimationFrame",vi.fn(()=>1));vi.stubGlobal("cancelAnimationFrame",vi.fn());const h=streamingPlaybackHarness(),firstEntered=gate();h.engine.status="paused";
-    h.engine.fillStreaming=vi.fn(async(start:number,signal:AbortSignal)=>{if(start===100){firstEntered.open();await firstEntered.wait;if(signal.aborted)throw new DOMException("aborted","AbortError");}h.engine.frames=[{frame:{width:2,height:2},time:start/10,mediaFrame:start}];return true;});
+    h.engine.fillStreaming=vi.fn(async(start:number,signal:AbortSignal)=>{if(start===100){firstEntered.open();await firstEntered.wait;if(signal.aborted)throw new DOMException("aborted","AbortError");}h.engine.frames=[{frame:planarFrame(),time:start/10,mediaFrame:start}];return true;});
     const first=h.engine.seek(10);await firstEntered.entered;const second=h.engine.seek(100);firstEntered.release();await expect(first).resolves.toBeUndefined();await expect(second).resolves.toBeUndefined();
     expect(h.callbacks.error).not.toHaveBeenCalled();expect(h.callbacks.status).not.toHaveBeenCalledWith("error");expect(h.engine.renderer.draw).toHaveBeenLastCalledWith(expect.objectContaining({width:2}),2,2);expect(h.engine.frames[0].time).toBe(100);
   });
@@ -408,7 +431,7 @@ function playbackHarness() {
   const audio={destination:{},resume:vi.fn(),suspend:vi.fn(),close:vi.fn(),createBufferSource:vi.fn(()=>{const source={stop:vi.fn(),disconnect:vi.fn(),connect:vi.fn(),start:vi.fn(),buffer:undefined};sources.push(source);return source;})};
   const callbacks={status:vi.fn(),ready:vi.fn(),time:vi.fn(),error:vi.fn(),timecode:vi.fn(),seeking:vi.fn()};
   const engine=Object.create(PlayerEngine.prototype) as any;
-  Object.assign(engine,{callbacks,renderer:{draw:vi.fn()},audio,audioBuffer:{duration:20},status:"ready",pausedAt:0,durationValue:1,frames:[{frame:{width:2,height:2},time:0}],destroyed:false,loadGeneration:0,seekGeneration:0,raf:0});
+  Object.assign(engine,{callbacks,renderer:{draw:vi.fn()},audio,audioBuffer:{duration:20},status:"ready",pausedAt:0,durationValue:1,frames:[{frame:planarFrame(),time:0}],destroyed:false,loadGeneration:0,seekGeneration:0,raf:0});
   return {engine,audio,callbacks,sources};
 }
 
@@ -439,7 +462,7 @@ describe("PlayerEngine streaming audio scheduling regressions",()=>{
   afterEach(()=>{vi.unstubAllGlobals();vi.restoreAllMocks();});
   it("appends only new chunks without stopping nodes or changing existing reservation times",()=>{const h=harness();h.engine.audioChunks=[chunk(1,2)];h.engine.resetAndScheduleStreamingAudio(1);const first=h.engine.scheduledAudio[0],firstTime=first.contextStartTime;h.engine.audioChunks.push(chunk(2,3));h.engine.appendStreamingAudioSchedule();expect(h.sources).toHaveLength(2);expect(first.sourceNode.stop).not.toHaveBeenCalled();expect(first.contextStartTime).toBe(firstTime);expect(h.engine.scheduledAudio[1].contextStartTime).toBeCloseTo(firstTime+1);h.engine.appendStreamingAudioSchedule();expect(h.sources).toHaveLength(2);});
   it("preserves real media gaps instead of packing chunks together",()=>{const h=harness();h.engine.audioChunks=[chunk(1,2),chunk(4,5)];h.engine.resetAndScheduleStreamingAudio(1);expect(h.engine.scheduledAudio[1].contextStartTime-h.engine.scheduledAudio[0].contextStartTime).toBeCloseTo(3);});
-  it("does not leave buffering until both video and audio fills complete",()=>{vi.stubGlobal("requestAnimationFrame",vi.fn(()=>1));vi.stubGlobal("cancelAnimationFrame",vi.fn());vi.spyOn(performance,"now").mockReturnValue(1000);const h=harness();h.engine.status="buffering";h.engine.buffering=true;h.engine.resumeAfterBuffer=true;h.engine.frames=[{frame:{width:2,height:2},time:1}];h.engine.audioChunks=[chunk(1,2)];h.engine.filling=Promise.resolve();h.engine.tryResumeFromBuffering();expect(h.engine.status).toBe("buffering");h.engine.filling=undefined;h.engine.audioFilling=Promise.resolve();h.engine.tryResumeFromBuffering();expect(h.engine.status).toBe("buffering");h.engine.audioFilling=undefined;h.engine.tryResumeFromBuffering();expect(h.engine.status).toBe("playing");});
+  it("does not leave buffering until both video and audio fills complete",()=>{vi.stubGlobal("requestAnimationFrame",vi.fn(()=>1));vi.stubGlobal("cancelAnimationFrame",vi.fn());vi.spyOn(performance,"now").mockReturnValue(1000);const h=harness();h.engine.status="buffering";h.engine.buffering=true;h.engine.resumeAfterBuffer=true;h.engine.frames=[{frame:planarFrame(),time:1}];h.engine.audioChunks=[chunk(1,2)];h.engine.filling=Promise.resolve();h.engine.tryResumeFromBuffering();expect(h.engine.status).toBe("buffering");h.engine.filling=undefined;h.engine.audioFilling=Promise.resolve();h.engine.tryResumeFromBuffering();expect(h.engine.status).toBe("buffering");h.engine.audioFilling=undefined;h.engine.tryResumeFromBuffering();expect(h.engine.status).toBe("playing");});
   it("treats an earlier audio ending as silence and never requests another fill",()=>{const h=harness();h.engine.audioExhausted=true;h.engine.lastAudioTime=4;h.engine.audioChunks=[];h.engine.fillStreamingAudio=vi.fn();expect(h.engine.audioReadyAt(8)).toBe(true);h.engine.requestAudioFill(8);expect(h.engine.fillStreamingAudio).not.toHaveBeenCalled();});
   it("rebuilds sources after pause and resume",async()=>{vi.stubGlobal("requestAnimationFrame",vi.fn(()=>1));vi.stubGlobal("cancelAnimationFrame",vi.fn());const h=harness();h.engine.audioChunks=[chunk(1,2)];h.engine.resetAndScheduleStreamingAudio(1);h.engine.pause();h.engine.pausedAt=1;await h.engine.play();expect(h.sources).toHaveLength(2);expect(h.sources[0].stop).toHaveBeenCalledOnce();expect(h.sources[1]).not.toBe(h.sources[0]);});
 });
