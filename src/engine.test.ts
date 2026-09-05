@@ -48,158 +48,118 @@ describe("loadCustomLibAV", () => {
   });
 });
 
-type DecoderMock = {
-  ff_init_decoder: ReturnType<typeof vi.fn>;
-  ff_decode_multi: ReturnType<typeof vi.fn>;
-  ff_free_decoder: ReturnType<typeof vi.fn>;
-};
-
-function decoderHarness(av: DecoderMock) {
-  const engine = Object.create(PlayerEngine.prototype) as {
-    libav: DecoderMock;
-    decodeVideo(chunks: Uint8Array[], codecId: number, av?: DecoderMock, mediaFrames?: number[], frameRate?: number): Promise<Array<{ time: number; mediaFrame: number }>>;
-  };
-  engine.libav = av;
-  return engine;
-}
-
-describe("PlayerEngine decoder cleanup", () => {
-  afterEach(() => vi.unstubAllGlobals());
-
-  it("frees ctx, pkt, and frame exactly once after successful decoding", async () => {
-    const [codec, ctx, pkt, frame] = [11, 22, 33, 44];
-    const av = {
-      ff_init_decoder: vi.fn().mockResolvedValue([codec, ctx, pkt, frame]),
-      ff_decode_multi: vi.fn().mockResolvedValue([]),
-      ff_free_decoder: vi.fn().mockResolvedValue(undefined),
-    };
-
-    await decoderHarness(av).decodeVideo([new Uint8Array([1])], 2);
-
-    expect(av.ff_free_decoder).toHaveBeenCalledOnce();
-    expect(av.ff_free_decoder).toHaveBeenCalledWith(ctx, pkt, frame);
-    expect(av.ff_free_decoder.mock.calls[0]).not.toContain(codec);
-  });
-
-  it("frees the decoder exactly once after decoding fails", async () => {
-    const decodeError = new Error("decode failed");
-    const av = {
-      ff_init_decoder: vi.fn().mockResolvedValue([11, 22, 33, 44]),
-      ff_decode_multi: vi.fn().mockRejectedValue(decodeError),
-      ff_free_decoder: vi.fn().mockResolvedValue(undefined),
-    };
-
-    await expect(decoderHarness(av).decodeVideo([], 2)).rejects.toBe(decodeError);
-    expect(av.ff_free_decoder).toHaveBeenCalledOnce();
-  });
-
-  it("does not hide a decoding error when decoder cleanup also fails", async () => {
-    const decodeError = new Error("decode failed");
-    const cleanupError = new Error("cleanup failed");
-    const av = {
-      ff_init_decoder: vi.fn().mockResolvedValue([11, 22, 33, 44]),
-      ff_decode_multi: vi.fn().mockRejectedValue(decodeError),
-      ff_free_decoder: vi.fn().mockRejectedValue(cleanupError),
-    };
-
-    await expect(decoderHarness(av).decodeVideo([], 2)).rejects.toBe(decodeError);
-    expect(av.ff_free_decoder).toHaveBeenCalledOnce();
-  });
-
-  it("reports a cleanup error when decoding succeeded", async () => {
-    const cleanupError = new Error("cleanup failed");
-    const av = {
-      ff_init_decoder: vi.fn().mockResolvedValue([11, 22, 33, 44]),
-      ff_decode_multi: vi.fn().mockResolvedValue([]),
-      ff_free_decoder: vi.fn().mockRejectedValue(cleanupError),
-    };
-
-    await expect(decoderHarness(av).decodeVideo([], 2)).rejects.toBe(cleanupError);
-    expect(av.ff_free_decoder).toHaveBeenCalledOnce();
-  });
-
-  it("falls back to input edit-unit order when decoded PTS uses another time base", async () => {
-    vi.stubGlobal("ImageData", class { constructor(public data: Uint8ClampedArray, public width: number, public height: number) {} });
-    const decodedFrame = (pts: number) => ({
-      pts, width: 2, height: 1, format: 4,
-      data: new Uint8Array([16, 16, 128, 128]),
-      layout: [{ offset: 0, stride: 2 }, { offset: 2, stride: 1 }, { offset: 3, stride: 1 }],
-    });
-    const av = {
-      AV_PIX_FMT_YUV422P: 4,
-      ff_init_decoder: vi.fn().mockResolvedValue([11, 22, 33, 44]),
-      ff_decode_multi: vi.fn().mockResolvedValue([decodedFrame(90_090), decodedFrame(180_180)]),
-      ff_free_decoder: vi.fn().mockResolvedValue(undefined),
-    };
-
-    const frames = await decoderHarness(av).decodeVideo(
-      [new Uint8Array([1]), new Uint8Array([2])], 2, av, [100, 101], 25,
-    );
-
-    expect(frames.map(item => item.mediaFrame)).toEqual([100, 101]);
-    expect(frames.map(item => item.time)).toEqual([4, 4.04]);
-  });
-
-  it("keeps valid decoded PTS so reordered MPEG-2 output retains its edit units", async () => {
-    vi.stubGlobal("ImageData", class { constructor(public data: Uint8ClampedArray, public width: number, public height: number) {} });
-    const decodedFrame = (pts: number) => ({
-      pts, width: 2, height: 1, format: 4,
-      data: new Uint8Array([16, 16, 128, 128]),
-      layout: [{ offset: 0, stride: 2 }, { offset: 2, stride: 1 }, { offset: 3, stride: 1 }],
-    });
-    const av = {
-      AV_PIX_FMT_YUV422P: 4,
-      ff_init_decoder: vi.fn().mockResolvedValue([11, 22, 33, 44]),
-      ff_decode_multi: vi.fn().mockResolvedValue([decodedFrame(102), decodedFrame(100), decodedFrame(101)]),
-      ff_free_decoder: vi.fn().mockResolvedValue(undefined),
-    };
-
-    const frames = await decoderHarness(av).decodeVideo(
-      [new Uint8Array([1]), new Uint8Array([2]), new Uint8Array([3])], 2, av, [100, 101, 102], 25,
-    );
-
-    expect(frames.map(item => item.mediaFrame)).toEqual([102, 100, 101]);
-  });
-});
-
-describe("PlayerEngine streaming decoder reuse", () => {
-  it("reuses one decoder across adjacent chunks and flushes it only at the end", async () => {
-    const av={AV_PIX_FMT_YUV422P:4,ff_init_decoder:vi.fn().mockResolvedValue([11,22,33,44]),ff_decode_multi:vi.fn().mockResolvedValue([]),ff_free_decoder:vi.fn().mockResolvedValue(undefined)};
-    const engine=Object.create(PlayerEngine.prototype) as any;Object.assign(engine,{libav:av,videoCodecId:2,durationValue:10});
-    await engine.decodeStreamingVideo([new Uint8Array([1])],[0],30,false,1,2);
-    await engine.decodeStreamingVideo([new Uint8Array([2])],[1],30,true,1,2);
-    expect(av.ff_init_decoder).toHaveBeenCalledOnce();
-    expect(av.ff_decode_multi).toHaveBeenNthCalledWith(1,22,33,44,expect.any(Array),false);
-    expect(av.ff_decode_multi).toHaveBeenNthCalledWith(2,22,33,44,expect.any(Array),true);
-    expect(av.ff_free_decoder).toHaveBeenCalledOnce();
-  });
-
-  it("defers disposal until an in-flight decode finishes", async () => {
-    let entered!:()=>void,release!:()=>void;const started=new Promise<void>(resolve=>{entered=resolve;}),wait=new Promise<void>(resolve=>{release=resolve;});
-    const av={ff_init_decoder:vi.fn().mockResolvedValue([11,22,33,44]),ff_decode_multi:vi.fn(async()=>{entered();await wait;return [];}),ff_free_decoder:vi.fn().mockResolvedValue(undefined)};
-    const engine=Object.create(PlayerEngine.prototype) as any;Object.assign(engine,{libav:av,videoCodecId:2,durationValue:10});
-    const decoding=engine.decodeStreamingVideo([new Uint8Array([1])],[0],30,false,1,2);await started;
-    engine.invalidateStreamingVideoDecoder();expect(av.ff_free_decoder).not.toHaveBeenCalled();
-    release();await decoding;expect(av.ff_free_decoder).toHaveBeenCalledOnce();
-  });
-
-  it("keeps decoded YUV planes for direct WebGL rendering and logs timings", async () => {
-    const decoded={pts:0,width:2,height:1,format:4,data:new Uint8Array([16,16,128,128]),layout:[{offset:0,stride:2},{offset:2,stride:1},{offset:3,stride:1}]};
-    const av={AV_PIX_FMT_YUV422P:4,ff_init_decoder:vi.fn().mockResolvedValue([11,22,33,44]),ff_decode_multi:vi.fn().mockResolvedValue([decoded]),ff_free_decoder:vi.fn().mockResolvedValue(undefined)};
-    const info=vi.spyOn(console,"info").mockImplementation(()=>undefined);
-    const engine=Object.create(PlayerEngine.prototype) as any;Object.assign(engine,{libav:av,videoCodecId:2,durationValue:1,videoRenderMode:"yuv-webgl",videoDecodeMs:0,videoColorConvertMs:0,videoDecodedFrames:0});
-    const frames=await engine.decodeStreamingVideo([new Uint8Array([1])],[0],30,true,1,2);
-    expect(frames[0].frame).toMatchObject({width:2,height:1,y:new Uint8Array([16,16]),u:new Uint8Array([128]),v:new Uint8Array([128])});
-    expect(engine.videoDecodedFrames).toBe(1);
-    expect(engine.videoColorConvertMs).toBe(0);
-    expect(info).toHaveBeenCalledWith("[H422Player] video performance",expect.objectContaining({renderMode:"yuv-webgl",inputPackets:1,decodedFrames:1,colorConvertMs:0}));
-    info.mockRestore();
-  });
+describe("PlayerEngine adaptive streaming buffer", () => {
   it("raises the GPU buffer target when measured decode cost would overlap playback",()=>{
     const engine=Object.create(PlayerEngine.prototype) as any;Object.assign(engine,{videoRenderMode:"yuv-webgl",videoAheadSeconds:6,refillThresholdSeconds:4,chunkSeconds:3,adaptiveVideoAheadSeconds:6,adaptiveRefillThresholdSeconds:4});
     engine.adaptStreamingBuffer(2300,90,30);
     expect(engine.adaptiveVideoAheadSeconds).toBe(9);
     expect(engine.adaptiveRefillThresholdSeconds).toBeGreaterThan(4);
+  });
+  it("also raises the buffer target in rgba (CPU conversion) mode",()=>{
+    const engine=Object.create(PlayerEngine.prototype) as any;Object.assign(engine,{videoRenderMode:"rgba",videoAheadSeconds:6,refillThresholdSeconds:4,chunkSeconds:3,adaptiveVideoAheadSeconds:6,adaptiveRefillThresholdSeconds:4});
+    engine.adaptStreamingBuffer(2300,90,30);
+    expect(engine.adaptiveVideoAheadSeconds).toBe(9);
+    expect(engine.adaptiveRefillThresholdSeconds).toBeGreaterThan(4);
+  });
+});
+
+describe("PlayerEngine decodeVideo/decodeStreamingVideo delegate to the video decoder client", () => {
+  function fakeClient(overrides: Partial<Record<string, any>> = {}) {
+    return {
+      init: vi.fn().mockResolvedValue(undefined),
+      decodeVideo: vi.fn().mockResolvedValue({ frames: [], decodeMs: 5, convertMs: 1 }),
+      decodeStreamingVideo: vi.fn().mockResolvedValue({ frames: [], decodeMs: 5, convertMs: 1 }),
+      invalidateStreaming: vi.fn(),
+      dispose: vi.fn(),
+      ...overrides,
+    };
+  }
+
+  it("decodeVideo forwards to the client and accumulates stats", async () => {
+    const client = fakeClient();
+    const engine = Object.create(PlayerEngine.prototype) as any;
+    Object.assign(engine, { dependencies: { createVideoDecoder: () => client }, videoRenderMode: "rgba", videoDecodeMs: 0, videoColorConvertMs: 0, videoDecodedFrames: 0 });
+    await engine.decodeVideo([new Uint8Array([1])], 2);
+    expect(client.decodeVideo).toHaveBeenCalledWith([new Uint8Array([1])], 2, [0], expect.any(Number), "rgba");
+    expect(engine.videoDecodeMs).toBe(5);
+    expect(engine.videoColorConvertMs).toBe(1);
+  });
+
+  it("decodeStreamingVideo forwards to the client, updates the buffer estimate, and remembers the decoder generation", async () => {
+    const client = fakeClient();
+    const engine = Object.create(PlayerEngine.prototype) as any;
+    Object.assign(engine, { dependencies: { createVideoDecoder: () => client }, videoRenderMode: "yuv-webgl", videoCodecId: 2, durationValue: 10, videoDecodeMs: 0, videoColorConvertMs: 0, videoDecodedFrames: 0, adaptiveVideoAheadSeconds: 6, adaptiveRefillThresholdSeconds: 4, videoAheadSeconds: 6, refillThresholdSeconds: 4, chunkSeconds: 3 });
+    await engine.decodeStreamingVideo([new Uint8Array([1])], [0], 30, false, 1, 2);
+    expect(client.decodeStreamingVideo).toHaveBeenCalledWith([new Uint8Array([1])], [0], 30, false, 1, 2, 2, "yuv-webgl", 300);
+    expect(engine.streamingDecoderGeneration).toEqual({ loadGeneration: 1, seekGeneration: 2 });
+  });
+
+  it("invalidateStreamingVideoDecoder forgets the decoder generation and notifies the client", () => {
+    const client = fakeClient();
+    const engine = Object.create(PlayerEngine.prototype) as any;
+    Object.assign(engine, { videoDecoderClient: client, streamingDecoderGeneration: { loadGeneration: 1, seekGeneration: 1 } });
+    engine.invalidateStreamingVideoDecoder();
+    expect(client.invalidateStreaming).toHaveBeenCalledOnce();
+    expect(engine.streamingDecoderGeneration).toBeUndefined();
+  });
+});
+
+describe("PlayerEngine drawAt", () => {
+  it("returns the last streaming frame at or before the requested time without mutating the queue",()=>{
+    const engine=Object.create(PlayerEngine.prototype) as any;
+    const frames=[{frame:{width:2,height:2},time:0,mediaFrame:0},{frame:{width:2,height:2},time:1,mediaFrame:30},{frame:{width:2,height:2},time:2,mediaFrame:60}];
+    Object.assign(engine,{mode:"streaming",essenceIndex:{frameRate:30},frames,renderer:{draw:vi.fn()}});
+    const result=engine.drawAt(1.5);
+    expect(result.mediaFrame).toBe(30);
+    expect(engine.frames).toBe(frames);
+    expect(engine.frames).toHaveLength(3);
+  });
+  it("returns undefined when no frame is at or before the requested time",()=>{
+    const engine=Object.create(PlayerEngine.prototype) as any;
+    Object.assign(engine,{mode:"streaming",essenceIndex:{frameRate:30},frames:[{frame:{width:2,height:2},time:5,mediaFrame:150}],renderer:{draw:vi.fn()}});
+    expect(engine.drawAt(1)).toBeUndefined();
+  });
+});
+
+describe("PlayerEngine video prefetch pipelining", () => {
+  function harness(){
+    const readRange=vi.fn().mockImplementation(async(_reader:any,_index:any,options:any)=>Array.from({length:options.endFrame-options.startFrame+1},(_,offset)=>({kind:"video",data:new Uint8Array([0,0,1,0xb3]),editUnit:options.startFrame+offset})));
+    const client={
+      init:async()=>undefined,
+      decodeVideo:async()=>({frames:[],decodeMs:0,convertMs:0}),
+      decodeStreamingVideo:async(chunks:Uint8Array[],mediaFrames:number[],frameRate:number)=>({frames:mediaFrames.map(mediaFrame=>({frame:{width:2,height:2},time:mediaFrame/frameRate,mediaFrame})),decodeMs:0,convertMs:0}),
+      invalidateStreaming:()=>{},dispose:()=>{},
+    };
+    const engine=Object.create(PlayerEngine.prototype) as any;
+    Object.assign(engine,{callbacks:{},reader:{},essenceIndex:{frameRate:10,packets:[]},durationValue:100,chunkSeconds:3,maxReadSize:1024,queuedThroughFrame:-1,frames:[],loadGeneration:1,seekGeneration:1,destroyed:false,videoRenderMode:"yuv-webgl",videoCodecId:2,videoDecodeMs:0,videoColorConvertMs:0,videoDecodedFrames:0,videoAheadSeconds:6,refillThresholdSeconds:4,adaptiveVideoAheadSeconds:6,adaptiveRefillThresholdSeconds:4,dependencies:{readRange,createVideoDecoder:()=>client}});
+    return {engine,readRange};
+  }
+
+  it("kicks off a prefetch for the next chunk after a successful fill",async()=>{
+    const {engine,readRange}=harness();
+    await engine.fillStreaming(0,new AbortController().signal,1,1);
+    expect(readRange).toHaveBeenCalledTimes(2);
+    expect(engine.videoPrefetch).toMatchObject({startFrame:30,endFrame:59});
+  });
+
+  it("reuses the prefetched range instead of reading it again",async()=>{
+    const {engine,readRange}=harness();
+    await engine.fillStreaming(0,new AbortController().signal,1,1);
+    readRange.mockClear();
+    await engine.fillStreaming(30,new AbortController().signal,1,1);
+    expect(readRange).toHaveBeenCalledTimes(1); // only the follow-up prefetch for the chunk after this one
+    expect(readRange.mock.calls[0][2]).toMatchObject({startFrame:60});
+  });
+
+  it("discards a stale prefetch made under a different seek generation",async()=>{
+    const {engine,readRange}=harness();
+    await engine.fillStreaming(0,new AbortController().signal,1,1);
+    const stalePrefetch=engine.videoPrefetch;
+    readRange.mockClear();
+    engine.seekGeneration=2;
+    await engine.fillStreaming(30,new AbortController().signal,1,2);
+    expect(readRange.mock.calls[0][2]).not.toMatchObject({startFrame:stalePrefetch.startFrame,endFrame:stalePrefetch.endFrame});
+    expect(readRange).toHaveBeenCalled();
   });
 });
 
@@ -240,7 +200,7 @@ function lifecycleHarness(block:"metadata"|"video"|"audio") {
     createReader:(blob:Blob)=>({size:BigInt(blob.size),read:vi.fn(),destroy:()=>destroyedReaders.push(blob.size),id:blob.size}),
     parseMetadata:async(reader:{id:number})=>{if(reader.id===1&&block==="metadata"){pause.open();await pause.wait;}return {mediaInfo:{timecodeTrackCount:0,indexTableCount:0,indexEntryCount:0,durationFrames:reader.id},timecodes:[],indexTables:[],partitions:[],usedRandomIndexPack:false};},
     readWhole:async(blob:Blob)=>new Uint8Array([blob.size]),parse:(bytes:Uint8Array)=>({packets:[{kind:"video",trackNumber:1,bodyOffset:0,data:new Uint8Array([bytes[0]])},{kind:"audio",trackNumber:1,bodyOffset:0,data:new Uint8Array([bytes[0],0,0,bytes[0],0,0])}],operationalPattern:"OP1a",isXdcamHd422:true,videoCodec:{codecId:2,codecName:"mpeg2video"},audioCodec:{codecId:65549,codecName:"pcm_s24be"}}),
-    loadLibav:async()=>({libavjs_with_swscale:async()=>1}),
+    createVideoDecoder:()=>({init:async()=>undefined,decodeVideo:async()=>({frames:[],decodeMs:0,convertMs:0}),decodeStreamingVideo:async()=>({frames:[],decodeMs:0,convertMs:0}),invalidateStreaming:()=>{},dispose:()=>{}}),
   }});
   engine.decodeVideo=async(chunks:Uint8Array[])=>{if(chunks[0][0]===1&&block==="video"){pause.open();await pause.wait;}return [{frame:{width:2,height:2},time:0}];};
   engine.preparePcm=async(chunks:Uint8Array[])=>{if(chunks[0][0]===1&&block==="audio"){pause.open();await pause.wait;}return {audio:{close:vi.fn()},audioBuffer:{}};};
@@ -261,14 +221,15 @@ describe("PlayerEngine streaming mode",()=>{
     Object.assign(engine,{callbacks,renderer:{draw:vi.fn()},mode:"streaming",frames:[],loadGeneration:0,seekGeneration:0,destroyed:false,videoAheadSeconds:6,retainBehindSeconds:1,refillThresholdSeconds:4,chunkSeconds:3,maxReadSize:1024,dependencies:{
       createReader:()=>({size:1000n,read:vi.fn(),destroy,getStats:()=>({bytesLoaded:20n,underlyingReadCount:2,cachedBytes:10})}),
       parseMetadata:async()=>({mediaInfo:{operationalPattern:"OP1a",essenceContainer:"060e2b34",video:{width:1920,height:1080},durationFrames:300,timecodeTrackCount:0,indexTableCount:0,indexEntryCount:0},timecodes:[],indexTables:[],partitions:[{offset:0n,kind:"header"}]}),
-      indexEssence:async()=>({frameRate:30,partitions:[],packets:Array.from({length:300},(_,editUnit)=>({kind:"video",editUnit}))}),readRange,readWhole,parse:vi.fn(),loadLibav:async()=>({libavjs_with_swscale:async()=>1})
+      indexEssence:async()=>({frameRate:30,partitions:[],packets:Array.from({length:300},(_,editUnit)=>({kind:"video",editUnit}))}),readRange,readWhole,parse:vi.fn(),createVideoDecoder:()=>({init:async()=>undefined,decodeVideo:async()=>({frames:[],decodeMs:0,convertMs:0}),decodeStreamingVideo:async()=>({frames:[],decodeMs:0,convertMs:0}),invalidateStreaming:()=>{},dispose:()=>{}})
     }});
     engine.decodeStreamingVideo=async(_chunks:any[],mediaFrames:number[],frameRate:number)=>mediaFrames.map(mediaFrame=>({frame:{width:2,height:2},time:mediaFrame/frameRate,mediaFrame}));
     engine.requestFill=vi.fn();engine.requestAudioFill=vi.fn();
     await engine.load(new Blob([new Uint8Array(1000)]));
     expect(readWhole).not.toHaveBeenCalled();
-    expect(readRange).toHaveBeenNthCalledWith(1,expect.anything(),expect.anything(),expect.objectContaining({startFrame:0,endFrame:89,maxReadSize:1024,kinds:["video"]}));
-    expect(readRange).toHaveBeenNthCalledWith(2,expect.anything(),expect.anything(),expect.objectContaining({startFrame:45,endFrame:179,maxReadSize:1024,kinds:["video"]}));
+    expect(readRange).toHaveBeenCalledWith(expect.anything(),expect.anything(),expect.objectContaining({startFrame:0,endFrame:89,maxReadSize:1024,kinds:["video"]}));
+    expect(readRange).toHaveBeenCalledWith(expect.anything(),expect.anything(),expect.objectContaining({startFrame:45,endFrame:179,maxReadSize:1024,kinds:["video"]}));
+    expect(readRange).toHaveBeenCalledWith(expect.anything(),expect.anything(),expect.objectContaining({startFrame:90,endFrame:179,maxReadSize:1024,kinds:["video"]})); // speculative prefetch of the next chunk
     expect(destroy).not.toHaveBeenCalled();
     expect(callbacks.ready).toHaveBeenCalledOnce();
     expect(engine.requestFill).toHaveBeenCalledWith(0);
@@ -295,7 +256,7 @@ describe("PlayerEngine streaming mode",()=>{
 
   it("continues at the next edit unit without rereading GOP preroll",async()=>{
     const h=streamingPlaybackHarness(),readRange=vi.fn().mockResolvedValue([{kind:"video",editUnit:90,data:new Uint8Array([1])}]);
-    h.engine.durationValue=10;h.engine.queuedThroughFrame=89;h.engine.dependencies={readRange};h.engine.streamingVideoDecoder={av:h.engine.libav,codecId:2,ctx:1,pkt:2,frame:3,loadGeneration:1,seekGeneration:1,busy:false,disposeRequested:false,disposed:false};
+    h.engine.durationValue=10;h.engine.queuedThroughFrame=89;h.engine.dependencies={readRange};h.engine.streamingDecoderGeneration={loadGeneration:1,seekGeneration:1};
     h.engine.decodeStreamingVideo=vi.fn().mockResolvedValue([{frame:{width:2,height:2},time:8.9,mediaFrame:89},{frame:{width:2,height:2},time:9,mediaFrame:90}]);h.engine.publishDiagnostics=vi.fn();
     await h.engine.fillStreaming(90,new AbortController().signal,1,1);
     expect(readRange).toHaveBeenCalledWith(h.engine.reader,h.engine.essenceIndex,expect.objectContaining({startFrame:90,endFrame:99,kinds:["video"]}));

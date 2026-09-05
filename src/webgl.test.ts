@@ -86,6 +86,24 @@ describe("WebGlRenderer", () => {
     expect(gl.texImage2D).toHaveBeenCalledTimes(1);
     expect(gl.texSubImage2D).toHaveBeenCalledOnce();
   });
+  it("caches uniform/attribute locations and skips redundant program/viewport state changes across frames",()=>{
+    const gl = createWebGlMock();
+    const canvas = { width: 0, height: 0, getContext: vi.fn(() => gl) } as unknown as HTMLCanvasElement;
+    const renderer = new WebGlRenderer(canvas);
+    expect(gl.getUniformLocation).toHaveBeenCalledTimes(4); // tex, texY, texU, texV - once each, at construction
+    const frame = { width: 1920, height: 1080, data: new Uint8ClampedArray(1920 * 1080 * 4) } as ImageData;
+    renderer.draw(frame, 1920, 1080);
+    expect(gl.viewport).toHaveBeenCalledTimes(1);
+    expect(gl.useProgram).toHaveBeenCalledTimes(1);
+    expect(gl.getAttribLocation).toHaveBeenCalledTimes(2);
+    renderer.draw(frame, 1920, 1080);
+    expect(gl.getUniformLocation).toHaveBeenCalledTimes(4); // still just the constructor calls
+    expect(gl.viewport).toHaveBeenCalledTimes(1); // same size, no re-issue
+    expect(gl.useProgram).toHaveBeenCalledTimes(1); // same program still active
+    expect(gl.getAttribLocation).toHaveBeenCalledTimes(2); // cached per-program
+    renderer.draw(frame, 640, 360);
+    expect(gl.viewport).toHaveBeenCalledTimes(2); // size changed
+  });
   it("uploads planar yuv422p without creating an RGBA image", () => {
     const gl=createWebGlMock();
     const canvas={width:0,height:0,getContext:vi.fn(()=>gl)} as unknown as HTMLCanvasElement;

@@ -45,6 +45,10 @@ export class WebGlRenderer {
   private yuvTextures:[WebGLTexture,WebGLTexture,WebGLTexture];
   private rgbaTextureSize?:{width:number;height:number};
   private yuvTextureSize?:{width:number;height:number};
+  private rgbaUniform:WebGLUniformLocation|null;
+  private yuvUniforms:[WebGLUniformLocation|null,WebGLUniformLocation|null,WebGLUniformLocation|null];
+  private attribLocations=new Map<WebGLProgram,[number,number]>();
+  private activeProgram?:WebGLProgram;
   constructor(private canvas: HTMLCanvasElement) {
     const gl = canvas.getContext("webgl", { alpha: false, antialias: false });
     if (!gl) throw new Error("WebGL is not available");
@@ -53,21 +57,28 @@ export class WebGlRenderer {
     gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,0,1,1,-1,1,1,-1,1,0,0,1,1,1,0]),gl.STATIC_DRAW);
     this.rgbaTexture=texture(gl);this.yuvTextures=[texture(gl),texture(gl),texture(gl)];
     gl.pixelStorei(gl.UNPACK_ALIGNMENT,1);
+    this.rgbaUniform=gl.getUniformLocation(this.rgbaProgram,"tex");
+    this.yuvUniforms=[gl.getUniformLocation(this.yuvProgram,"texY"),gl.getUniformLocation(this.yuvProgram,"texU"),gl.getUniformLocation(this.yuvProgram,"texV")];
   }
   private use(programValue:WebGLProgram):void {
-    const gl=this.gl;gl.useProgram(programValue);
-    for(const [name,at] of [["p",0],["t",2]] as const){const loc=gl.getAttribLocation(programValue,name);gl.enableVertexAttribArray(loc);gl.vertexAttribPointer(loc,2,gl.FLOAT,false,16,at*4);}
+    if(this.activeProgram===programValue)return;
+    const gl=this.gl;gl.useProgram(programValue);this.activeProgram=programValue;
+    let locations=this.attribLocations.get(programValue);
+    if(!locations){locations=[gl.getAttribLocation(programValue,"p"),gl.getAttribLocation(programValue,"t")];this.attribLocations.set(programValue,locations);}
+    const [p,t]=locations;
+    gl.enableVertexAttribArray(p);gl.vertexAttribPointer(p,2,gl.FLOAT,false,16,0);
+    gl.enableVertexAttribArray(t);gl.vertexAttribPointer(t,2,gl.FLOAT,false,16,2*4);
   }
   draw(frame: TexImageSource|Yuv422Frame, width: number, height: number): void {
-    if(this.canvas.width!==width||this.canvas.height!==height){this.canvas.width=width;this.canvas.height=height;}
-    const gl=this.gl;gl.viewport(0,0,width,height);
+    const gl=this.gl;
+    if(this.canvas.width!==width||this.canvas.height!==height){this.canvas.width=width;this.canvas.height=height;gl.viewport(0,0,width,height);}
     if(isYuv422Frame(frame)){
-      this.use(this.yuvProgram);const planes=[frame.y,frame.u,frame.v],names=["texY","texU","texV"];
+      this.use(this.yuvProgram);const planes=[frame.y,frame.u,frame.v];
       const allocate=!this.yuvTextureSize||this.yuvTextureSize.width!==width||this.yuvTextureSize.height!==height;
-      for(let i=0;i<3;i++){gl.activeTexture(gl.TEXTURE0+i);gl.bindTexture(gl.TEXTURE_2D,this.yuvTextures[i]);const planeWidth=i===0?width:Math.ceil(width/2);if(allocate)gl.texImage2D(gl.TEXTURE_2D,0,gl.LUMINANCE,planeWidth,height,0,gl.LUMINANCE,gl.UNSIGNED_BYTE,planes[i]);else gl.texSubImage2D(gl.TEXTURE_2D,0,0,0,planeWidth,height,gl.LUMINANCE,gl.UNSIGNED_BYTE,planes[i]);gl.uniform1i(gl.getUniformLocation(this.yuvProgram,names[i]),i);}
+      for(let i=0;i<3;i++){gl.activeTexture(gl.TEXTURE0+i);gl.bindTexture(gl.TEXTURE_2D,this.yuvTextures[i]);const planeWidth=i===0?width:Math.ceil(width/2);if(allocate)gl.texImage2D(gl.TEXTURE_2D,0,gl.LUMINANCE,planeWidth,height,0,gl.LUMINANCE,gl.UNSIGNED_BYTE,planes[i]);else gl.texSubImage2D(gl.TEXTURE_2D,0,0,0,planeWidth,height,gl.LUMINANCE,gl.UNSIGNED_BYTE,planes[i]);gl.uniform1i(this.yuvUniforms[i],i);}
       this.yuvTextureSize={width,height};
     }else{
-      this.use(this.rgbaProgram);gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,this.rgbaTexture);if(!this.rgbaTextureSize||this.rgbaTextureSize.width!==width||this.rgbaTextureSize.height!==height){gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,frame);this.rgbaTextureSize={width,height};}else gl.texSubImage2D(gl.TEXTURE_2D,0,0,0,gl.RGBA,gl.UNSIGNED_BYTE,frame);gl.uniform1i(gl.getUniformLocation(this.rgbaProgram,"tex"),0);
+      this.use(this.rgbaProgram);gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,this.rgbaTexture);if(!this.rgbaTextureSize||this.rgbaTextureSize.width!==width||this.rgbaTextureSize.height!==height){gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,frame);this.rgbaTextureSize={width,height};}else gl.texSubImage2D(gl.TEXTURE_2D,0,0,0,gl.RGBA,gl.UNSIGNED_BYTE,frame);gl.uniform1i(this.rgbaUniform,0);
     }
     gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
   }
