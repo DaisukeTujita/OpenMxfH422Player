@@ -16,6 +16,8 @@ export interface PlayerDiagnostics {
   seekReadBytes?: number; seekElapsedMs?: number | null; selectedTimecodeTrack?: "unresolved" | null;
   timecodeSelectionReason?: string;
   videoDecodedFrames: number; videoDecodeMs: number; videoColorConvertMs: number; videoUploadMs: number;
+  decoderExecution?: "libav-worker"; adaptiveVideoAheadSeconds?: number; adaptiveRefillThresholdSeconds?: number;
+  lastChunkDecodeMs?: number; pooledVideoFrames?: number;
 }
 
 export interface PlayerInfo {
