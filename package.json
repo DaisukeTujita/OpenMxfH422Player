@@ -1,6 +1,6 @@
 {
   "name": "@openmxf/h422-player",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Browser-native OP1a/XDCAM HD422 MXF player for React",
   "type": "module",
   "main": "./dist/index.js",

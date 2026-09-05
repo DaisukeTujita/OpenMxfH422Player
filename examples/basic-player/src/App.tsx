@@ -97,6 +97,10 @@ export function App() {
 
   return (
     <main>
+      <header className="app-header">
+        <span className="app-title">OpenMxfH422Player</span>
+        <span className="app-version" title={`git commit ${__GIT_COMMIT__}`}>v{__APP_VERSION__} ({__GIT_COMMIT__})</span>
+      </header>
       <section className="panel file-panel">
         <label className="mode-control">再生方式
           <select value={mode} onChange={event=>{const nextMode=event.target.value as PlaybackMode;console.info("[H422Player example] playback mode changed", { from: mode, to: nextMode });setBuffering(false);setMode(nextMode);}}>
