@@ -7,6 +7,7 @@ import {
   type PlayerInfo,
   type PlayerStatus,
   type PlaybackMode,
+  type VideoRenderMode,
   type PlayerDiagnostics,
 } from "@openmxf/h422-player";
 
@@ -46,6 +47,7 @@ export function App() {
   const [seeking, setSeeking] = useState(false);
   const [buffering, setBuffering] = useState(false);
   const [mode,setMode]=useState<PlaybackMode>("streaming");
+  const [videoRenderMode,setVideoRenderMode]=useState<VideoRenderMode>("rgba");
   const [diagnostics,setDiagnostics]=useState<PlayerDiagnostics>();
   const selectedStartTimecode = mediaInfo?.selectedTimecode
     ? formatTimecodeFrame(mediaInfo.selectedTimecode.startFrame, mediaInfo.selectedTimecode.roundedTimecodeBase, mediaInfo.selectedTimecode.dropFrame)
@@ -108,6 +110,12 @@ export function App() {
             <option value="legacy">Legacy</option>
           </select>
         </label>
+        <label className="mode-control">映像描画
+          <select value={videoRenderMode} onChange={event=>{const next=event.target.value as VideoRenderMode;console.info("[H422Player example] video render mode changed",{from:videoRenderMode,to:next});setVideoRenderMode(next);}}>
+            <option value="rgba">RGBA（CPU変換）</option>
+            <option value="yuv-webgl">YUV→WebGL（GPU変換）</option>
+          </select>
+        </label>
         <label className="file-picker">
           <span>MXF選択</span>
           <input type="file" accept=".mxf,application/mxf" onChange={(event) => selectFile(event.target.files?.[0])} />
@@ -119,12 +127,13 @@ export function App() {
       <section className="viewer" aria-label="MXF player">
         {file ? (
           <H422Player
-            key={`${file.name}-${file.lastModified}-${mode}`}
+            key={`${file.name}-${file.lastModified}-${mode}-${videoRenderMode}`}
             ref={playerRef}
             src={file}
             controls={false}
             libavBase="/libav"
             mode={mode}
+            videoRenderMode={videoRenderMode}
             onDiagnostics={setDiagnostics}
             onBufferingChange={setBuffering}
             onReady={setInfo}
@@ -189,7 +198,7 @@ export function App() {
           </dl>
         </div>
         <div className="panel error-panel"><h2>エラー</h2><p>{error || "エラーはありません"}</p></div>
-        <div className="panel"><h2>Streaming診断</h2><p>方式: {mode}</p><p>TC Track: {diagnostics?.selectedTimecodeTrack??"なし"} / {diagnostics?.timecodeSelectionReason??"-"}</p><p>seek: requested {diagnostics?.requestedTimecode??diagnostics?.requestedFrame??"-"} / actual {diagnostics?.actualDisplayedFrame??"-"} / start {diagnostics?.seekStartFrame??"-"} / preroll {diagnostics?.prerollFrames??0} / {diagnostics?.seekSource??"-"}</p><p>seek I/O: {diagnostics?.seekReadBytes??0} bytes / {diagnostics?.seekElapsedMs?.toFixed(1)??"-"} ms</p><p>ファイル: {diagnostics?.fileSize??0} bytes</p><p>Reader: {diagnostics?.bytesLoaded??0} bytes / {diagnostics?.underlyingReadCount??0} reads</p><p>キャッシュ: {diagnostics?.cacheBytes??0} bytes</p><p>映像キュー: {diagnostics?.videoQueueFrames??0} frames ({diagnostics?.videoQueueStart?.toFixed(2)??"-"}–{diagnostics?.videoQueueEnd?.toFixed(2)??"-"}s)</p><p>音声状態: {mode!=="streaming"?"legacy":buffering?"buffering中":diagnostics?.streamingAudioSupported?(status==="playing"?"対応・再生中":"対応"):mediaInfo?.audio?"未対応形式のため映像のみ":"音声なし"}</p><p>音声形式: {diagnostics?.audioSampleRate??"-"} Hz / {diagnostics?.audioChannels??"-"} ch / track {diagnostics?.selectedAudioTrackNumber??"-"}</p><p>音声キュー: {diagnostics?.audioQueueStart?.toFixed(2)??"-"}–{diagnostics?.audioQueueEnd?.toFixed(2)??"-"}s / {diagnostics?.scheduledAudioRanges??0} nodes / {diagnostics?.audioBytesLoaded??0} bytes / {diagnostics?.audioExhausted?"終端":"補充中"}</p><p>形式判定: {diagnostics?.audioFormatBasis??"-"}</p><p>A/V drift: {diagnostics?.audioVideoDriftMs?.toFixed(1)??"-"} ms</p><p>世代: load {diagnostics?.loadGeneration??0} / seek {diagnostics?.seekGeneration??0}</p></div>
+        <div className="panel"><h2>Streaming診断</h2><p>方式: {mode} / 描画: {diagnostics?.videoRenderMode??videoRenderMode}</p><p>映像性能: decode {diagnostics?.videoDecodeMs.toFixed(1)??"-"} ms / RGBA変換 {diagnostics?.videoColorConvertMs.toFixed(1)??"-"} ms / GPU転送・描画 {diagnostics?.videoUploadMs.toFixed(1)??"-"} ms / {diagnostics?.videoDecodedFrames??0} frames</p><p>TC Track: {diagnostics?.selectedTimecodeTrack??"なし"} / {diagnostics?.timecodeSelectionReason??"-"}</p><p>seek: requested {diagnostics?.requestedTimecode??diagnostics?.requestedFrame??"-"} / actual {diagnostics?.actualDisplayedFrame??"-"} / start {diagnostics?.seekStartFrame??"-"} / preroll {diagnostics?.prerollFrames??0} / {diagnostics?.seekSource??"-"}</p><p>seek I/O: {diagnostics?.seekReadBytes??0} bytes / {diagnostics?.seekElapsedMs?.toFixed(1)??"-"} ms</p><p>ファイル: {diagnostics?.fileSize??0} bytes</p><p>Reader: {diagnostics?.bytesLoaded??0} bytes / {diagnostics?.underlyingReadCount??0} reads</p><p>キャッシュ: {diagnostics?.cacheBytes??0} bytes</p><p>映像キュー: {diagnostics?.videoQueueFrames??0} frames ({diagnostics?.videoQueueStart?.toFixed(2)??"-"}–{diagnostics?.videoQueueEnd?.toFixed(2)??"-"}s)</p><p>音声状態: {mode!=="streaming"?"legacy":buffering?"buffering中":diagnostics?.streamingAudioSupported?(status==="playing"?"対応・再生中":"対応"):mediaInfo?.audio?"未対応形式のため映像のみ":"音声なし"}</p><p>音声形式: {diagnostics?.audioSampleRate??"-"} Hz / {diagnostics?.audioChannels??"-"} ch / track {diagnostics?.selectedAudioTrackNumber??"-"}</p><p>音声キュー: {diagnostics?.audioQueueStart?.toFixed(2)??"-"}–{diagnostics?.audioQueueEnd?.toFixed(2)??"-"}s / {diagnostics?.scheduledAudioRanges??0} nodes / {diagnostics?.audioBytesLoaded??0} bytes / {diagnostics?.audioExhausted?"終端":"補充中"}</p><p>形式判定: {diagnostics?.audioFormatBasis??"-"}</p><p>A/V drift: {diagnostics?.audioVideoDriftMs?.toFixed(1)??"-"} ms</p><p>世代: load {diagnostics?.loadGeneration??0} / seek {diagnostics?.seekGeneration??0}</p></div>
       </section>
     </main>
   );

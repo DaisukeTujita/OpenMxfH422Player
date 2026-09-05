@@ -182,6 +182,19 @@ describe("PlayerEngine streaming decoder reuse", () => {
     engine.invalidateStreamingVideoDecoder();expect(av.ff_free_decoder).not.toHaveBeenCalled();
     release();await decoding;expect(av.ff_free_decoder).toHaveBeenCalledOnce();
   });
+
+  it("keeps decoded YUV planes for direct WebGL rendering and logs timings", async () => {
+    const decoded={pts:0,width:2,height:1,format:4,data:new Uint8Array([16,16,128,128]),layout:[{offset:0,stride:2},{offset:2,stride:1},{offset:3,stride:1}]};
+    const av={AV_PIX_FMT_YUV422P:4,ff_init_decoder:vi.fn().mockResolvedValue([11,22,33,44]),ff_decode_multi:vi.fn().mockResolvedValue([decoded]),ff_free_decoder:vi.fn().mockResolvedValue(undefined)};
+    const info=vi.spyOn(console,"info").mockImplementation(()=>undefined);
+    const engine=Object.create(PlayerEngine.prototype) as any;Object.assign(engine,{libav:av,videoCodecId:2,durationValue:1,videoRenderMode:"yuv-webgl",videoDecodeMs:0,videoColorConvertMs:0,videoDecodedFrames:0});
+    const frames=await engine.decodeStreamingVideo([new Uint8Array([1])],[0],30,true,1,2);
+    expect(frames[0].frame).toMatchObject({width:2,height:1,y:new Uint8Array([16,16]),u:new Uint8Array([128]),v:new Uint8Array([128])});
+    expect(engine.videoDecodedFrames).toBe(1);
+    expect(engine.videoColorConvertMs).toBe(0);
+    expect(info).toHaveBeenCalledWith("[H422Player] video performance",expect.objectContaining({renderMode:"yuv-webgl",inputPackets:1,decodedFrames:1,colorConvertMs:0}));
+    info.mockRestore();
+  });
 });
 
 describe("selectTimecodeTrack unresolved package fallback", () => {

@@ -1,8 +1,9 @@
 export type PlayerStatus = "idle" | "loading" | "ready" | "playing" | "paused" | "buffering" | "ended" | "error";
 export type PlaybackMode = "streaming" | "legacy";
+export type VideoRenderMode = "rgba" | "yuv-webgl";
 
 export interface PlayerDiagnostics {
-  mode: PlaybackMode; fileSize: number; bytesLoaded: number; underlyingReadCount: number;
+  mode: PlaybackMode; videoRenderMode: VideoRenderMode; fileSize: number; bytesLoaded: number; underlyingReadCount: number;
   cacheBytes: number; videoQueueFrames: number; videoQueueStart: number | null;
   videoQueueEnd: number | null; scheduledAudioRanges: number; loadGeneration: number; seekGeneration: number;
   streamingAudioSupported: boolean; selectedAudioTrackNumber: number | null;
@@ -14,6 +15,7 @@ export interface PlayerDiagnostics {
   seekStartFrame?: number | null; prerollFrames?: number; seekSource?: "index" | "sequential-fallback" | null;
   seekReadBytes?: number; seekElapsedMs?: number | null; selectedTimecodeTrack?: "unresolved" | null;
   timecodeSelectionReason?: string;
+  videoDecodedFrames: number; videoDecodeMs: number; videoColorConvertMs: number; videoUploadMs: number;
 }
 
 export interface PlayerInfo {
@@ -43,6 +45,8 @@ export interface H422PlayerProps {
   muted?: boolean;
   /** Reader-backed bounded playback. Legacy remains the conservative default. */
   mode?: PlaybackMode;
+  /** CPU YUV-to-RGBA conversion, or direct planar YUV upload with GPU conversion. */
+  videoRenderMode?: VideoRenderMode;
   /** Directory containing the libav runtime copied by copy-libav-assets.mjs. */
   libavBase?: string;
   className?: string;
