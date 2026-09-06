@@ -28,20 +28,52 @@ function partitionFor(offset: bigint, partitions: MxfPartitionInfo[]): MxfPartit
   return found;
 }
 
-function uniqueTablesBy(tables: MxfIndexTable[], field: "bodySid" | "indexSid"): Map<number, MxfIndexTable> {
-  const result = new Map<number, MxfIndexTable>(), ambiguous = new Set<number>();
+/**
+ * One Index Table Segment per Body Partition is the ordinary MXF shape, so several segments sharing
+ * a SID are slices of one index rather than a conflict. Entries already carry absolute edit units
+ * (startPosition + i), so combining them is a union; the earliest segment wins any overlap. Treating
+ * repeats as ambiguous instead left every edit unit past the first segment with no index data, which
+ * silently disabled key-frame seeking and decimated playback over most of a long file.
+ */
+/** SID 0 is MXF's "none"; treating it as an identifier attaches indexes to the wrong stream. */
+const sid = (value: number | undefined) => value === undefined || value === 0 ? undefined : value;
+
+function mergeSegments(tables: MxfIndexTable[]): EntryLookup | undefined {
+  const lookup: EntryLookup = new Map();
+  for (const table of [...tables].sort((a, b) => a.startPosition - b.startPosition))
+    for (const entry of table.entries) {
+      const existing = lookup.get(entry.editUnit);
+      // Segments of one index are disjoint. Two different descriptions of the same edit unit are a
+      // real contradiction, so the group is dropped rather than silently resolved; a repeat of the
+      // identical entry, which some writers put in the footer, is not.
+      if (!existing) { lookup.set(entry.editUnit, entry); continue; }
+      if (existing.streamOffset !== entry.streamOffset || existing.keyFrameOffset !== entry.keyFrameOffset) return undefined;
+    }
+  return lookup;
+}
+
+function lookupsBy(tables: MxfIndexTable[], field: "bodySid" | "indexSid"): Map<number, EntryLookup> {
+  const grouped = new Map<number, MxfIndexTable[]>();
   for (const table of tables) {
-    const value = table[field]; if (value === undefined) continue;
-    if (result.has(value)) { result.delete(value); ambiguous.add(value); }
-    else if (!ambiguous.has(value)) result.set(value, table);
+    const value = sid(table[field]); if (value === undefined) continue;
+    grouped.set(value, [...(grouped.get(value) ?? []), table]);
   }
+  const result = new Map<number, EntryLookup>();
+  for (const [value, group] of grouped) { const merged = mergeSegments(group); if (merged) result.set(value, merged); }
   return result;
 }
 
 function indexLookups(tables: MxfIndexTable[]) {
-  const entries = new Map<MxfIndexTable, EntryLookup>();
-  for (const table of tables) entries.set(table, new Map(table.entries.map(entry => [entry.editUnit, entry])));
-  return { entries, byBodySid: uniqueTablesBy(tables, "bodySid"), byIndexSid: uniqueTablesBy(tables, "indexSid"), sole: tables.length === 1 ? tables[0] : undefined };
+  // An IndexSID names one index stream, so its segments merge even when they carry different
+  // BodySIDs: a segment written into the footer partition indexes the same essence but is stamped
+  // with that partition's BodySID (commonly 0). Grouping on BodySID alone therefore split one index
+  // in two and left everything past the first segment unindexed.
+  const indexSidForBodySid = new Map<number, number>();
+  for (const table of tables)
+    if (sid(table.bodySid) !== undefined && sid(table.indexSid) !== undefined && !indexSidForBodySid.has(table.bodySid!)) indexSidForBodySid.set(table.bodySid!, table.indexSid!);
+  // Segments naming no SID at all cannot be attributed, so they are trusted only when none does.
+  const unattributed = tables.every(table => sid(table.bodySid) === undefined && sid(table.indexSid) === undefined);
+  return { byBodySid: lookupsBy(tables, "bodySid"), byIndexSid: lookupsBy(tables, "indexSid"), indexSidForBodySid, sole: unattributed && tables.length ? mergeSegments(tables) : undefined };
 }
 
 /** Builds a lightweight KLV map. Values are skipped using BER lengths and are never read. */
@@ -65,20 +97,30 @@ export async function indexMxfEssence(reader: RandomAccessReader, options: { par
       const editUnit = counts.get(streamKey) ?? 0; counts.set(streamKey, editUnit + 1);
       // MXF Index Tables describe picture edit units here. Never attach an ambiguous
       // table (or a picture table to sound); missing data deliberately uses preroll.
-      const soleMatches = lookups.sole &&
-        (lookups.sole.bodySid === undefined || lookups.sole.bodySid === owner?.bodySid) &&
-        (lookups.sole.indexSid === undefined || lookups.sole.indexSid === owner?.indexSid);
-      const table = kind === "video" ?
-        (owner?.bodySid !== undefined ? lookups.byBodySid.get(owner.bodySid) : undefined) ??
-        (owner?.indexSid !== undefined ? lookups.byIndexSid.get(owner.indexSid) : undefined) ??
-        (soleMatches ? lookups.sole : undefined) : undefined;
-      const tableEntry = table ? lookups.entries.get(table)?.get(editUnit) : undefined;
+      const ownerBodySid = sid(owner?.bodySid), indexSid = sid(owner?.indexSid) ?? (ownerBodySid !== undefined ? lookups.indexSidForBodySid.get(ownerBodySid) : undefined);
+      const lookup = kind === "video" ?
+        (indexSid !== undefined ? lookups.byIndexSid.get(indexSid) : undefined) ??
+        (ownerBodySid !== undefined ? lookups.byBodySid.get(ownerBodySid) : undefined) ??
+        lookups.sole : undefined;
+      const tableEntry = lookup?.get(editUnit);
       packets.push({ offset, valueOffset: header.valueOffset, valueLength: header.valueLength, trackNumber, bodySID: owner?.bodySid, kind, editUnit, presentationTime: editUnit / frameRate, partition: owner, keyFrameOffset: tableEntry?.keyFrameOffset, temporalOffset: tableEntry?.temporalOffset, flags: tableEntry?.flags, isRandomAccessPoint: tableEntry?.isRandomAccessPoint });
     }
     if (header.nextOffset <= offset) throw new Error("Invalid zero-length KLV progression");
     offset = header.nextOffset;
   }
   return { packets, partitions, frameRate };
+}
+
+/**
+ * Whether this packet can be decoded without any preceding one. The Index Entry says so three
+ * different ways depending on the writer: a KeyFrameOffset of 0 points at itself, an explicit
+ * RandomAccessPoint flag, or bit 7 of the entry flags. Nothing indexed means nothing decimatable.
+ */
+export function isRandomAccessVideoPacket(packet: EssenceIndexEntry): boolean {
+  if (packet.keyFrameOffset !== undefined) return packet.keyFrameOffset === 0;
+  if (packet.isRandomAccessPoint !== undefined) return packet.isRandomAccessPoint;
+  if (packet.flags !== undefined) return (packet.flags & 0x80) !== 0;
+  return false;
 }
 
 export function essenceDecodeStart(index: EssenceIndex, target: number, preroll = DEFAULT_ESSENCE_PREROLL_FRAMES): number {

@@ -62,6 +62,8 @@ export default function Preview({ file }: { file: File }) {
 }
 ```
 
+`videoRenderMode` の既定値は `yuv-webgl` で、yuv422p平面をそのままGPUへ転送しシェーダーで変換します。CPU変換が必要な場合は `rgba` を指定してください。**WebGLコンテキストが取得できない環境では2D canvasへ自動フォールバックし、`rgba` を強制します**（平面YUVを2D canvasで変換する手段がないため）。フォールバックしたかどうかは診断値 `rendererBackend`（`"webgl"` または `"canvas2d"`）で判別できます。
+
 `mode` は `"legacy" | "streaming"` で、既定値は安全な `legacy` です。streaming では
 `readWhole()` を呼ばず、1回約3秒（`chunkSeconds`）の区間を取得してデコードします。先読み目標は
 既定6秒で、実測したデコード時間に応じて最大9秒まで自動的に伸び、さらに後述のバイト上限で
@@ -116,7 +118,34 @@ streaming音声はDescriptorが **48 kHz / 24-bit / 2 ch** でSound Essence pack
 `PlayerInfo.audioChannels` は「現在再生可能な音声チャンネル数」です。このため映像のみのstreamingでは
 音声なし、muted、または未対応Descriptorでは `0` を返し、音声Essence Valueを読み込みません。診断には対応状態、選択trackNumber、形式、音声キュー範囲、予約Node数、読込byte数、A/V driftを含みます。
 
-`src`には`File`、`Blob`、またはCORSを許可したURLを指定できます。`ref`から`play()`、`pause()`、`seek(seconds)`、`currentTime`、`duration`を利用できます。音声はブラウザのautoplay policyにより通常ユーザー操作後に開始します。シーク時はAudioBufferSourceNodeを指定位置から作り直します。
+`src`には`File`、`Blob`、またはCORSを許可したURLを指定できます。`ref`から`play()`、`pause()`、`seek(seconds)`、`stepFrame(frames)`、`seekRelative(seconds)`、`seekTimecode(timecode)`、`setPlaybackRate(rate)`、`currentTime`、`duration`、`playbackRate`、`getDiagnostics()`を利用できます。
+
+`stepFrame(frames)` はコマ送り／コマ戻しです（負値で後方）。再生中に呼ぶと**先に一時停止します**。そうしないと再生時計が進んで、seekが着地する前に目的フレームを通り過ぎるためです。`seekRelative(seconds)` は相対スキップで、素材範囲へクランプされ、再生中ならそのまま再生を続けます。どちらも既存の世代管理付きseekを経由するため、`onSeekingChange` が通常どおり通知されます。
+
+### 再生速度と早戻し
+
+`setPlaybackRate(rate)` で速度を設定します。**符号付き**で、負値が逆再生です。速度と方向を別々に持つ設計も考えられますが、値が1つなら「速度0で方向あり」のような不正な組み合わせが存在せず、再生時計も `アンカー + 経過時間 × rate` で方向が自然に出るため、符号付きを採用しています。`0` は「再生中なのに進まない」を意味するため拒否します。停止は `pause()` です。現在値は `ref.playbackRate` と診断値 `playbackRate` で読めます。
+
+**全フレームをデコードする方式では2倍速・4倍速は物理的に不可能です。** 全フレームデコードには速度に比例したスループットが必要で、本実装の1080iは実測で概ね1.0〜1.2倍リアルタイムです。2倍速には約2.4倍、4倍速には約4.8倍が必要で、バッファを厚くしても埋まりません。
+
+そのため以下のように自動で切り替えます。
+
+| 速度 | フレーム選択 | 音声 |
+|---|---|---|
+| 1.0x | 全フレーム | 再生 |
+| 1.5x（`fullDecodeMaxRate` 既定値まで） | 全フレーム | `playbackRate` で再生（ピッチは上がります） |
+| 2.0x / 4.0x | **Iフレームのみ**（間引き表示） | ミュート |
+| 逆再生（全速度） | **Iフレームのみ** | ミュート |
+
+閾値はハードコードせず `fullDecodeMaxRate`（既定 `DEFAULT_FULL_DECODE_MAX_RATE` = 1.5）で設定できます。SIMDビルド等でデコードが速くなれば、コード変更なしにより高速域まで全フレームデコードへ回せます。
+
+**逆再生は全速度でIフレームのみです。** MPEG-2 Long-GOPは後ろ向きにデコードできないため、逆方向1.5倍であってもGOP全体を前向きにデコードして大半を捨てる必要があり、実効コストは順方向の4〜5倍になります。Iフレームのみなら1 GOP（12〜15フレーム）あたり1枚で済み、桁で軽くなります。
+
+Iフレームの位置はMXF Index EntryのKeyFrameOffset / RandomAccessPoint / Flagsから判定します。**索引にRandom Access Pointが1つも無い素材では間引き再生ができず**、その旨のエラーになります。実際にどちらで動作しているかは診断値 `frameSelection`（`"all-frames"` / `"key-frames"`）と `audioPlaybackRate`（ミュート時は `0`）で確認できます。
+
+速度変更でフレーム選択方式または方向が変わると、キューの中身が用をなさなくなる（密度が違う／進行方向と反対側を保持している）ため、内部で現在位置へ再シークしてキューを詰め直します。同じ方式内での変更は再生時計の張り直しだけです。
+
+シーク中・バッファリング中の状態は `onSeekingChange` / `onBufferingChange`、および `PlayerStatus` の `buffering` として公開します。**どのUIを非活性にするかはホストアプリの責務**であり、ライブラリはそのための状態提供に留めます。`examples/basic-player` は3つを合成した `transportBusy` でトランスポート系ボタンを落としています。音声はブラウザのautoplay policyにより通常ユーザー操作後に開始します。シーク時はAudioBufferSourceNodeを指定位置から作り直します。
 
 追加コールバックの `onMediaInfo` はMXFから実際に取得できた構造情報を返し、未取得フィールドは `undefined` のままです。`onTimecode` は現在位置のSMPTEタイムコード、Timecode Trackがない場合は `null` を返します。`onSeekingChange` はシーク処理の開始・終了を通知します。`onBufferingChange` はstreaming映像のバッファ枯渇・復旧、およびseek中の準備状態を重複なく通知します。
 

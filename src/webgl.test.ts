@@ -1,5 +1,5 @@
-import { describe, expect, it, vi } from "vitest";
-import { WebGlRenderer } from "./webgl";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { Canvas2dRenderer, createFrameRenderer, WebGlRenderer } from "./webgl";
 
 function createWebGlMock() {
   const gl = {
@@ -119,4 +119,57 @@ describe("WebGlRenderer", () => {
     expect(gl.texSubImage2D).toHaveBeenCalledTimes(3);
   });
 
+});
+
+describe("createFrameRenderer", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("uses WebGL when a context is available", () => {
+    const canvas = { width: 0, height: 0, getContext: vi.fn(() => createWebGlMock()) } as unknown as HTMLCanvasElement;
+    expect(createFrameRenderer(canvas).backend).toBe("webgl");
+  });
+
+  it("falls back to the 2D canvas when WebGL is missing, and says so", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const context2d = { putImageData: vi.fn() };
+    const canvas = { width: 0, height: 0, getContext: vi.fn((kind: string) => kind === "2d" ? context2d : null) } as unknown as HTMLCanvasElement;
+
+    const renderer = createFrameRenderer(canvas);
+
+    expect(renderer.backend).toBe("canvas2d");
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("WebGL is unavailable"), expect.anything());
+  });
+
+  it("throws only when neither context can be had", () => {
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const canvas = { width: 0, height: 0, getContext: vi.fn(() => null) } as unknown as HTMLCanvasElement;
+    expect(() => createFrameRenderer(canvas)).toThrow("Neither WebGL nor a 2D canvas context is available");
+  });
+});
+
+describe("Canvas2dRenderer", () => {
+  function setup() {
+    const context2d = { putImageData: vi.fn() };
+    const canvas = { width: 0, height: 0, getContext: vi.fn(() => context2d) } as unknown as HTMLCanvasElement;
+    return { canvas, context2d, renderer: new Canvas2dRenderer(canvas) };
+  }
+
+  it("puts RGBA frames straight onto the canvas and sizes it to the media", () => {
+    vi.stubGlobal("ImageData", class { constructor(public data: Uint8ClampedArray, public width: number, public height: number) {} });
+    const { canvas, context2d, renderer } = setup();
+    const frame = new ImageData(new Uint8ClampedArray(4 * 2 * 4), 4, 2);
+
+    renderer.draw(frame, 4, 2);
+
+    expect(context2d.putImageData).toHaveBeenCalledWith(frame, 0, 0);
+    expect([canvas.width, canvas.height]).toEqual([4, 2]);
+    vi.unstubAllGlobals();
+  });
+
+  it("rejects planar frames it has no way to convert", () => {
+    vi.stubGlobal("ImageData", class {});
+    const { renderer } = setup();
+    expect(() => renderer.draw({ width: 4, height: 2, y: new Uint8Array(8), u: new Uint8Array(4), v: new Uint8Array(4) }, 4, 2)).toThrow("needs RGBA frames");
+    vi.unstubAllGlobals();
+  });
 });

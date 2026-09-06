@@ -3,10 +3,10 @@ import { parseMxfMetadataFromReader } from "./mxf-reader";
 import { FileRandomAccessReader, type RandomAccessReader } from "./random-access-reader";
 import { pcmS24beToFloat32, XDCAM_FRAME_RATE } from "./media";
 import { timecodeAtSeconds, timecodeToMediaFrame, type MxfTimecodeInfo } from "./timecode";
-import { findSeekPoint } from "./mxf-index";
+import { findSeekPoint, mergeIndexTables } from "./mxf-index";
 import type { PlayerInfo, PlayerStatus } from "./types";
-import { WebGlRenderer, type Yuv422Frame } from "./webgl";
-import { essenceDecodeStart, indexMxfEssence, readEssenceRange, type EssenceIndex, type ReadEssencePacket } from "./essence-reader";
+import { createFrameRenderer, type FrameRenderer, type Yuv422Frame } from "./webgl";
+import { essenceDecodeStart, indexMxfEssence, isRandomAccessVideoPacket, readEssenceRange, type EssenceIndex, type ReadEssencePacket } from "./essence-reader";
 import type { PlaybackMode, PlayerDiagnostics, VideoRenderMode } from "./types";
 import { createWorkerVideoDecoderClient, type VideoDecoderClient } from "./video-decoder-client";
 import { renderFrameBuffers, renderFrameBytes, type WorkerRenderFrame } from "./video-decode-core";
@@ -52,7 +52,17 @@ const defaultDependencies: PlayerEngineDependencies = {
  */
 export const DEFAULT_VIDEO_QUEUE_MAX_BYTES = 1024 * 1024 * 1024;
 
-export interface PlayerEngineOptions { mode?: PlaybackMode; videoRenderMode?:VideoRenderMode; videoAheadSeconds?:number; retainBehindSeconds?:number; refillThresholdSeconds?:number; chunkSeconds?:number; maxReadSize?:number; videoQueueMaxBytes?:number }
+/**
+ * Above this rate a forward playback decodes only random-access frames instead of every frame.
+ * Decoding all frames needs throughput proportional to the rate, and this codebase measures roughly
+ * 1.0-1.2x realtime for 1080i, so 2x would need ~2.4x and 4x ~4.8x — not reachable by buffering.
+ * It is an option rather than a constant so a faster build (a SIMD libav, say) can raise it without
+ * a code change. Reverse ignores it: MPEG-2 Long-GOP cannot be decoded backwards, so even 1.5x
+ * reverse would mean decoding each GOP forwards and throwing most of it away.
+ */
+export const DEFAULT_FULL_DECODE_MAX_RATE = 1.5;
+
+export interface PlayerEngineOptions { mode?: PlaybackMode; videoRenderMode?:VideoRenderMode; videoAheadSeconds?:number; retainBehindSeconds?:number; refillThresholdSeconds?:number; chunkSeconds?:number; maxReadSize?:number; videoQueueMaxBytes?:number; fullDecodeMaxRate?:number }
 
 type TimecodeLogger = Pick<Console, "debug" | "info" | "warn">;
 
@@ -71,8 +81,14 @@ export function selectTimecodeTrack(timecodes: MxfTimecodeInfo[], logger: Timeco
 }
 
 export class PlayerEngine {
-  private renderer: WebGlRenderer; private audio?: AudioContext; private audioBuffer?: AudioBuffer; private audioSource?: AudioBufferSourceNode;
-  private status: PlayerStatus="idle"; private startedAt=0; private pausedAt=0; private durationValue=0;
+  private renderer: FrameRenderer; private audio?: AudioContext; private audioBuffer?: AudioBuffer; private audioSource?: AudioBufferSourceNode;
+  private status: PlayerStatus="idle"; private playAnchorMedia=0; private playAnchorWall=0; private pausedAt=0; private durationValue=0;
+  /**
+   * Signed rather than a rate plus a direction flag: one value has no invalid combinations, and the
+   * clock is then just anchor + elapsed * rate, with direction falling out of the arithmetic.
+   * Zero is rejected because it would mean "playing but not moving"; pause() is how you stop.
+   */
+  private playbackRateValue=1;
   private frames: RenderFrame[]=[]; private raf=0;
   private timecodeInfo?: MxfTimecodeInfo;
   private loadController?: AbortController; private destroyed=false; private loadGeneration=0;
@@ -81,21 +97,30 @@ export class PlayerEngine {
   private reader?: RandomAccessReader & {destroy():void}; private essenceIndex?:EssenceIndex; private indexTables:import("./mxf-index").MxfIndexTable[]=[]; private mode:PlaybackMode;
   private fileSize=0; private videoRenderMode:VideoRenderMode; private videoDecodedFrames=0; private videoDecodeMs=0; private videoColorConvertMs=0; private videoUploadMs=0; private filling?:Promise<void>; private fillController?:AbortController; private queuedThroughFrame=-1; private videoCodecId=2;
   private videoDecoderClient?:VideoDecoderClient; private streamingDecoderGeneration?:{loadGeneration:number; seekGeneration:number}; private videoPrefetch?:VideoPrefetch; private playbackCheckActive=false;
-  private recyclableBuffers:ArrayBuffer[]=[]; private pooledVideoFrames=0;
+  private recyclableBuffers:ArrayBuffer[]=[]; private pooledVideoFrames=0; private keyFrameCoverage?:{from:number;to:number};
   private buffering=false; private resumeAfterBuffer=false;
   private streamingAudioSupported=false; private audioFormatBasis:PlayerDiagnostics["audioFormatBasis"]=null; private selectedAudioTrackNumber?:number; private audioSampleRate?:number; private audioChannels?:number;
   private audioChunks:StreamingAudioChunk[]=[]; private scheduledAudio:ScheduledAudio[]=[]; private audioBytesLoaded=0; private audioMediaAnchor?:number; private audioContextAnchor?:number; private audioQueuedThroughTime=0; private audioExhausted=false; private lastAudioTime=0; private audioFillController?:AbortController; private audioFilling?:Promise<void>;
   private destroyedReaders?:WeakSet<object>;
-  private readonly videoAheadSeconds:number; private readonly retainBehindSeconds:number; private readonly refillThresholdSeconds:number; private readonly chunkSeconds:number; private readonly maxReadSize:number; private readonly videoQueueMaxBytes:number;
+  private readonly videoAheadSeconds:number; private readonly retainBehindSeconds:number; private readonly refillThresholdSeconds:number; private readonly chunkSeconds:number; private readonly maxReadSize:number; private readonly videoQueueMaxBytes:number; private readonly fullDecodeMaxRate:number;
   private frameBytes=0;
   private adaptiveVideoAheadSeconds:number; private adaptiveRefillThresholdSeconds:number; private lastChunkDecodeMs=0;
   private readonly dependencies: PlayerEngineDependencies;
-  constructor(canvas: HTMLCanvasElement, private callbacks: Callbacks, private muted=false, private libavBase="/libav", dependencies: Partial<PlayerEngineDependencies>={}, options:PlayerEngineOptions={}) { this.renderer=new WebGlRenderer(canvas);this.dependencies={...defaultDependencies,...dependencies};this.mode=options.mode??"legacy";this.videoRenderMode=options.videoRenderMode??"rgba";this.videoAheadSeconds=options.videoAheadSeconds??6;this.retainBehindSeconds=options.retainBehindSeconds??1;this.refillThresholdSeconds=options.refillThresholdSeconds??4;this.adaptiveVideoAheadSeconds=this.videoAheadSeconds;this.adaptiveRefillThresholdSeconds=this.refillThresholdSeconds;this.chunkSeconds=options.chunkSeconds??3;this.maxReadSize=options.maxReadSize??4*1024*1024;this.videoQueueMaxBytes=options.videoQueueMaxBytes??DEFAULT_VIDEO_QUEUE_MAX_BYTES; }
-  get currentTime(): number { return this.status === "playing" ? Math.min(this.durationValue,(performance.now()-this.startedAt)/1000) : this.pausedAt; }
+  constructor(canvas: HTMLCanvasElement, private callbacks: Callbacks, private muted=false, private libavBase="/libav", dependencies: Partial<PlayerEngineDependencies>={}, options:PlayerEngineOptions={}) { this.dependencies={...defaultDependencies,...dependencies};this.renderer=createFrameRenderer(canvas);this.mode=options.mode??"legacy";
+    // Planar YUV has no path on a 2D canvas, so a WebGL fallback also forces CPU colour conversion.
+    this.videoRenderMode=this.renderer.backend==="canvas2d"?"rgba":(options.videoRenderMode??"yuv-webgl");this.videoAheadSeconds=options.videoAheadSeconds??6;this.retainBehindSeconds=options.retainBehindSeconds??1;this.refillThresholdSeconds=options.refillThresholdSeconds??4;this.adaptiveVideoAheadSeconds=this.videoAheadSeconds;this.adaptiveRefillThresholdSeconds=this.refillThresholdSeconds;this.chunkSeconds=options.chunkSeconds??3;this.maxReadSize=options.maxReadSize??4*1024*1024;this.videoQueueMaxBytes=options.videoQueueMaxBytes??DEFAULT_VIDEO_QUEUE_MAX_BYTES;this.fullDecodeMaxRate=options.fullDecodeMaxRate??DEFAULT_FULL_DECODE_MAX_RATE; }
+  get currentTime(): number {
+    if (this.status !== "playing") return this.pausedAt;
+    const elapsed=(performance.now()-this.playAnchorWall)/1000*this.playbackRateValue;
+    return Math.min(this.durationValue,Math.max(0,this.playAnchorMedia+elapsed));
+  }
+  get playbackRate(): number { return this.playbackRateValue; }
+  /** `delayMs` lets the media clock start when the audio reservation does, keeping the two aligned. */
+  private anchorPlayback(mediaTime:number,delayMs=0):void { this.playAnchorMedia=mediaTime; this.playAnchorWall=performance.now()+delayMs; }
   get duration(): number { return this.durationValue; }
   private setStatus(s: PlayerStatus) { this.status=s; this.callbacks.status(s); }
   private drawFrame(frame:ImageData|Yuv422Frame):void { const started=performance.now();this.renderer.draw(frame,frame.width,frame.height);this.videoUploadMs+=(performance.now()-started); }
-  getDiagnostics():PlayerDiagnostics { const stats=(this.reader as any)?.getStats?.()??{};const active=this.audio&&this.scheduledAudio.find(range=>range.contextStartTime<=this.audio!.currentTime&&range.contextStartTime+range.mediaEndTime-range.mediaStartTime>=this.audio!.currentTime);const audioTime=active&&this.audio?active.mediaStartTime+this.audio.currentTime-active.contextStartTime:null;return {mode:this.mode,videoRenderMode:this.videoRenderMode,fileSize:this.fileSize,bytesLoaded:Number(stats.bytesLoaded??0),underlyingReadCount:stats.underlyingReadCount??0,cacheBytes:stats.cachedBytes??0,videoQueueFrames:this.frames.length,videoQueueStart:this.frames[0]?.time??null,videoQueueEnd:this.frames.at(-1)?.time??null,scheduledAudioRanges:this.mode==="streaming"?this.scheduledAudio.length:(this.audioSource?1:0),loadGeneration:this.loadGeneration,seekGeneration:this.seekGeneration,streamingAudioSupported:this.streamingAudioSupported,selectedAudioTrackNumber:this.selectedAudioTrackNumber??null,audioSampleRate:this.audioSampleRate??null,audioChannels:this.audioChannels??null,audioQueueStart:this.audioChunks?.[0]?.mediaStartTime??null,audioQueueEnd:this.audioChunks?.at(-1)?.mediaEndTime??null,audioVideoDriftMs:audioTime===null?null:(audioTime-this.currentTime)*1000,audioBytesLoaded:this.audioBytesLoaded,audioQueuedThroughTime:this.audioQueuedThroughTime,audioExhausted:this.audioExhausted,lastPlayableAudioTime:this.streamingAudioSupported?this.lastAudioTime:null,audioFormatBasis:this.audioFormatBasis,requestedTimecode:this.requestedTimecode,requestedFrame:this.requestedFrame,actualDisplayedFrame:this.actualDisplayedFrame,seekStartFrame:this.seekStartFrame,prerollFrames:this.prerollFrames,seekSource:this.seekSource,seekReadBytes:this.seekReadBytes,seekElapsedMs:this.seekElapsedMs,selectedTimecodeTrack:this.timecodeInfo?"unresolved":null,timecodeSelectionReason:this.timecodeSelectionReason,videoDecodedFrames:this.videoDecodedFrames,videoDecodeMs:this.videoDecodeMs,videoColorConvertMs:this.videoColorConvertMs,videoUploadMs:this.videoUploadMs,decoderExecution:"dedicated-worker",adaptiveVideoAheadSeconds:this.aheadSecondsTarget(),adaptiveRefillThresholdSeconds:this.refillThresholdTarget(),videoQueueBytes:this.videoQueueBytes(),videoQueueMaxBytes:this.videoQueueMaxBytes,lastChunkDecodeMs:this.lastChunkDecodeMs??0,pooledVideoFrames:this.pooledVideoFrames??0}; }
+  getDiagnostics():PlayerDiagnostics { const stats=(this.reader as any)?.getStats?.()??{};const active=this.audio&&this.scheduledAudio.find(range=>range.contextStartTime<=this.audio!.currentTime&&range.contextStartTime+(range.mediaEndTime-range.mediaStartTime)/(this.audioPlaybackRate()||1)>=this.audio!.currentTime);const audioTime=active&&this.audio?active.mediaStartTime+(this.audio.currentTime-active.contextStartTime)*(this.audioPlaybackRate()||1):null;return {mode:this.mode,videoRenderMode:this.videoRenderMode,fileSize:this.fileSize,bytesLoaded:Number(stats.bytesLoaded??0),underlyingReadCount:stats.underlyingReadCount??0,cacheBytes:stats.cachedBytes??0,videoQueueFrames:this.frames.length,videoQueueStart:this.frames[0]?.time??null,videoQueueEnd:this.frames.at(-1)?.time??null,scheduledAudioRanges:this.mode==="streaming"?this.scheduledAudio.length:(this.audioSource?1:0),loadGeneration:this.loadGeneration,seekGeneration:this.seekGeneration,streamingAudioSupported:this.streamingAudioSupported,selectedAudioTrackNumber:this.selectedAudioTrackNumber??null,audioSampleRate:this.audioSampleRate??null,audioChannels:this.audioChannels??null,audioQueueStart:this.audioChunks?.[0]?.mediaStartTime??null,audioQueueEnd:this.audioChunks?.at(-1)?.mediaEndTime??null,audioVideoDriftMs:audioTime===null?null:(audioTime-this.currentTime)*1000,audioBytesLoaded:this.audioBytesLoaded,audioQueuedThroughTime:this.audioQueuedThroughTime,audioExhausted:this.audioExhausted,lastPlayableAudioTime:this.streamingAudioSupported?this.lastAudioTime:null,audioFormatBasis:this.audioFormatBasis,requestedTimecode:this.requestedTimecode,requestedFrame:this.requestedFrame,actualDisplayedFrame:this.actualDisplayedFrame,seekStartFrame:this.seekStartFrame,prerollFrames:this.prerollFrames,seekSource:this.seekSource,seekReadBytes:this.seekReadBytes,seekElapsedMs:this.seekElapsedMs,selectedTimecodeTrack:this.timecodeInfo?"unresolved":null,timecodeSelectionReason:this.timecodeSelectionReason,videoDecodedFrames:this.videoDecodedFrames,videoDecodeMs:this.videoDecodeMs,videoColorConvertMs:this.videoColorConvertMs,videoUploadMs:this.videoUploadMs,decoderExecution:"dedicated-worker",rendererBackend:this.renderer.backend,playbackRate:this.playbackRateValue??1,frameSelection:this.frameSelection(),audioPlaybackRate:this.audioPlaybackRate(),adaptiveVideoAheadSeconds:this.aheadSecondsTarget(),adaptiveRefillThresholdSeconds:this.refillThresholdTarget(),videoQueueBytes:this.videoQueueBytes(),videoQueueMaxBytes:this.videoQueueMaxBytes,lastChunkDecodeMs:this.lastChunkDecodeMs??0,pooledVideoFrames:this.pooledVideoFrames??0}; }
   private publishDiagnostics(){this.callbacks.diagnostics?.(this.getDiagnostics());}
   private getVideoDecoder():VideoDecoderClient { return this.videoDecoderClient??=this.dependencies.createVideoDecoder(); }
   /**
@@ -111,6 +136,7 @@ export class PlayerEngine {
   private takeRecyclableBuffers():ArrayBuffer[] { return (this.recyclableBuffers??=[]).splice(0); }
   private clearFrames():void { this.stageForRecycling(this.frames); this.frames=[]; }
   private evictFramesBefore(time:number):void { const keep:RenderFrame[]=[],drop:RenderFrame[]=[];for(const item of this.frames)(item.time>=time?keep:drop).push(item);this.frames=keep;this.stageForRecycling(drop); }
+  private evictFramesAfter(time:number):void { const keep:RenderFrame[]=[],drop:RenderFrame[]=[];for(const item of this.frames)(item.time<=time?keep:drop).push(item);this.frames=keep;this.stageForRecycling(drop); }
   /**
    * The seconds target and the byte budget are both ceilings on the queue; whichever binds first
    * wins. Seconds alone let 1080-line 4:2:2 reach well over a gigabyte at the 9 s the adaptive
@@ -126,13 +152,48 @@ export class PlayerEngine {
   }
   private refillThresholdTarget():number { return Math.min(this.adaptiveRefillThresholdSeconds,Math.max(.25,this.aheadSecondsTarget()-.25)); }
   private videoQueueBytes():number { return this.frames.length*this.frameBytes; }
+  /**
+   * Which frames a refill decodes. Reverse is always decimated: MPEG-2 Long-GOP has no backwards
+   * decode, so playing a GOP in reverse means decoding it forwards and discarding most of it.
+   */
+  private frameSelection():"all-frames"|"key-frames" {
+    const rate=this.playbackRateValue??1;
+    return rate<0||Math.abs(rate)>(this.fullDecodeMaxRate??DEFAULT_FULL_DECODE_MAX_RATE)?"key-frames":"all-frames";
+  }
+  private isReverse():boolean { return (this.playbackRateValue??1)<0; }
+  /**
+   * Audio only follows the video clock while it can be played straight through. Above the
+   * full-decode rate the video is decimated, so there is no continuous timeline to play against,
+   * and reverse audio has no useful meaning here. Both mute.
+   */
+  private audioPlaybackRate():number { const rate=this.playbackRateValue??1; return rate>0&&rate<=(this.fullDecodeMaxRate??DEFAULT_FULL_DECODE_MAX_RATE)?rate:0; }
   private adaptStreamingBuffer(processMs:number,inputFrames:number,frameRate:number):void { this.lastChunkDecodeMs=processMs;if(inputFrames<1)return;const processSeconds=processMs/1000,mediaSeconds=inputFrames/frameRate,maxAhead=Math.max(this.videoAheadSeconds,this.chunkSeconds*3);if(mediaSeconds<=0)return;const desired=this.chunkSeconds+processSeconds*2+.5;this.adaptiveVideoAheadSeconds=Math.min(maxAhead,Math.max(this.videoAheadSeconds,Math.ceil(desired/this.chunkSeconds)*this.chunkSeconds));this.adaptiveRefillThresholdSeconds=Math.min(this.adaptiveVideoAheadSeconds-.25,Math.max(this.refillThresholdSeconds,processSeconds*1.75+.75)); }
   private destroyReader(reader?:RandomAccessReader & {destroy():void}){if(!reader)return;const destroyed=this.destroyedReaders??=new WeakSet<object>();if(destroyed.has(reader))return;destroyed.add(reader);reader.destroy();}
   private releaseReader(expected?:RandomAccessReader & {destroy():void}){const reader=expected??this.reader;if(!reader)return;if(this.reader===reader)this.reader=undefined;this.destroyReader(reader);}
   private abortFill(){this.fillController?.abort();this.fillController=undefined;this.filling=undefined;this.audioFillController?.abort();this.audioFillController=undefined;this.audioFilling=undefined;this.videoPrefetch=undefined;}
   private setBuffering(value:boolean){if(this.buffering===value)return;this.buffering=value;this.callbacks.buffering?.(value);}
+  /** How much media is queued in the direction of travel. */
+  private bufferedAhead(t:number):number { return this.isReverse()?t-(this.frames[0]?.time??t):(this.frames.at(-1)?.time??t)-t; }
+  /** Reverse runs out at the head of the media, not at its tail. */
+  private fillExhausted(){ return this.isReverse()?(this.keyFrameCoverage?.from??1)<=0:this.streamExhausted(); }
   private streamExhausted(){const videos=this.essenceIndex?.packets.filter(packet=>packet.kind==="video");const last=videos?.at(-1);return Boolean(last&&this.queuedThroughFrame>=last.editUnit);}
-  private streamAtEnd(t:number){if(!this.streamExhausted()||!this.essenceIndex)return false;const lastTime=this.frames.at(-1)?.time??0;return t>=Math.min(lastTime,this.durationValue-1/this.essenceIndex.frameRate);}
+  /**
+   * An empty queue is running dry, not reaching the end. Defaulting the last frame's time to 0 made
+   * any exhausted-and-drained queue read as "at the end", which cut decimated playback short the
+   * moment a refill fell behind.
+   */
+  private streamAtEnd(t:number){
+    if(!this.streamExhausted()||!this.essenceIndex)return false;
+    const endOfMedia=this.durationValue-1/this.essenceIndex.frameRate,lastTime=this.frames.at(-1)?.time;
+    return lastTime===undefined?t>=endOfMedia:t>=Math.min(lastTime,endOfMedia);
+  }
+  /** Reverse has no "ended": running back past frame 0 parks the playhead at the head, paused. */
+  private finishReachedStart(){
+    if(this.status==="paused")return;
+    this.pausedAt=0;this.drawAt(0);this.emitTime(0);
+    cancelAnimationFrame(this.raf);this.raf=0;this.resumeAfterBuffer=false;this.setBuffering(false);
+    this.stopAudioSource();void this.audio?.suspend();this.setStatus("paused");
+  }
   private finishEnded(){if(this.status==="ended")return;const last=this.frames.at(-1);if(last)this.drawFrame(last.frame);this.pausedAt=this.durationValue;this.emitTime(this.durationValue);cancelAnimationFrame(this.raf);this.raf=0;this.resumeAfterBuffer=false;this.setBuffering(false);this.stopAudioSource();void this.audio?.suspend();this.setStatus("ended");}
   private failStreaming(error:Error){this.abortFill();this.invalidateStreamingVideoDecoder();cancelAnimationFrame(this.raf);this.raf=0;this.resumeAfterBuffer=false;this.setBuffering(false);this.stopAudioSource();void this.audio?.suspend();this.clearFrames();this.releaseReader();this.setStatus("error");this.callbacks.error(error);}
   async load(source: File|Blob|string): Promise<void> {
@@ -221,6 +282,33 @@ export class PlayerEngine {
     for(const item of wanted)if(!existing.has(item.mediaFrame))this.frames.push(item);
     this.frames.sort((a,b)=>a.mediaFrame-b.mediaFrame);this.queuedThroughFrame=Math.max(this.queuedThroughFrame,end);this.publishDiagnostics();return true;
   }
+  /**
+   * Decodes only the random-access frames covering the look-ahead, which is what makes 2x, 4x and
+   * every reverse rate possible at all: an XDCAM GOP is 12-15 frames, so this is roughly an order
+   * of magnitude less decode work than playing every frame. Each key frame carries its own sequence
+   * header, so the batch is flushed as a self-contained decode rather than continuing a stream.
+   */
+  private async fillKeyFrames(anchorFrame:number,signal:AbortSignal,loadGeneration:number,seekGeneration:number):Promise<boolean>{
+    if(!this.reader||!this.essenceIndex)return false;
+    const current=()=>!signal.aborted&&!this.destroyed&&loadGeneration===this.loadGeneration&&seekGeneration===this.seekGeneration;
+    const fps=this.essenceIndex.frameRate,last=Math.max(0,Math.ceil(this.durationValue*fps)-1);
+    const span=Math.max(1,Math.ceil(this.aheadSecondsTarget()*fps));
+    const anchor=Math.min(last,Math.max(0,Math.trunc(anchorFrame)));
+    const startFrame=this.isReverse()?Math.max(0,anchor-span):anchor,endFrame=this.isReverse()?anchor:Math.min(last,anchor+span);
+    if(endFrame<startFrame)return current();
+    const packets=await this.dependencies.readRange(this.reader,this.essenceIndex,{startFrame,endFrame,prerollFrames:0,signal,maxReadSize:this.maxReadSize,kinds:["video"]});
+    if(!current())return false;
+    const keys=packets.filter(packet=>packet.kind==="video"&&isRandomAccessVideoPacket(packet));
+    if(!keys.length)throw new Error(`No random access point is indexed between frames ${startFrame} and ${endFrame}; this material cannot be played at a decimated rate`);
+    const decoded=await this.decodeStreamingVideo(keys.map(packet=>packet.data),keys.map(packet=>packet.editUnit),fps,true,loadGeneration,seekGeneration);
+    if(!current())return false;
+    const existing=new Set(this.frames.map(frame=>frame.mediaFrame));
+    for(const item of decoded)if(!existing.has(item.mediaFrame))this.frames.push(item);
+    this.frames.sort((a,b)=>a.mediaFrame-b.mediaFrame);
+    this.keyFrameCoverage=this.isReverse()?{from:startFrame,to:Math.max(this.keyFrameCoverage?.to??endFrame,endFrame)}:{from:Math.min(this.keyFrameCoverage?.from??startFrame,startFrame),to:endFrame};
+    this.queuedThroughFrame=Math.max(this.queuedThroughFrame,endFrame);
+    this.publishDiagnostics();return true;
+  }
   private async fillInitialStreamingBuffer(signal:AbortSignal,loadGeneration:number,seekGeneration:number):Promise<void>{
     if(!this.essenceIndex)return;
     const current=()=>!signal.aborted&&!this.destroyed&&loadGeneration===this.loadGeneration&&seekGeneration===this.seekGeneration;
@@ -239,7 +327,11 @@ export class PlayerEngine {
     }
     if(current()&&videoBufferedSeconds()<target()-1/fps)throw new Error("The MPEG-2 decoder did not produce the requested initial buffer");
   }
-  private requestFill(t:number,force=false){if(this.mode!=="streaming"||!this.essenceIndex||this.filling||this.streamExhausted())return;const fps=this.essenceIndex.frameRate,ahead=(this.frames.at(-1)?.time??t)-t;if(!force&&ahead>=this.refillThresholdTarget())return;const controller=new AbortController();this.fillController=controller;const loadGeneration=this.loadGeneration,seekGeneration=this.seekGeneration,start=Math.max(Math.floor(t*fps),this.queuedThroughFrame+1);const promise=this.fillStreaming(start,controller.signal,loadGeneration,seekGeneration).then(applied=>{if(!applied||controller.signal.aborted||this.filling!==promise)return;const remaining=(this.frames.at(-1)?.time??t)-t;if(remaining<this.aheadSecondsTarget()&&!this.streamExhausted()){this.filling=undefined;this.fillController=undefined;this.requestFill(t,true);return;}if(this.buffering&&this.streamAtEnd(this.pausedAt)){this.finishEnded();return;}}).catch(e=>{if((e as Error).name!=="AbortError"&&this.filling===promise&&loadGeneration===this.loadGeneration&&seekGeneration===this.seekGeneration&&!this.destroyed)this.failStreaming(e instanceof Error?e:new Error(String(e)));}).finally(()=>{if(this.filling===promise){this.filling=undefined;if(this.fillController===controller)this.fillController=undefined;this.tryResumeFromBuffering(loadGeneration,seekGeneration);}});this.filling=promise;}
+  private requestFill(t:number,force=false){if(this.mode!=="streaming"||!this.essenceIndex||this.filling||this.fillExhausted())return;const fps=this.essenceIndex.frameRate,ahead=this.bufferedAhead(t);if(!force&&ahead>=this.refillThresholdTarget())return;const controller=new AbortController();this.fillController=controller;const loadGeneration=this.loadGeneration,seekGeneration=this.seekGeneration;
+    const keyFrames=this.frameSelection()==="key-frames";
+    // Forward all-frames continues from the queued edge; every other mode works out from the playhead.
+    const start=keyFrames?(this.isReverse()?Math.floor((this.keyFrameCoverage?.from??Math.floor(t*fps))):Math.max(Math.floor(t*fps),(this.keyFrameCoverage?.to??-1)+1)):Math.max(Math.floor(t*fps),this.queuedThroughFrame+1);
+    const promise=(keyFrames?this.fillKeyFrames(start,controller.signal,loadGeneration,seekGeneration):this.fillStreaming(start,controller.signal,loadGeneration,seekGeneration)).then(applied=>{if(!applied||controller.signal.aborted||this.filling!==promise)return;const remaining=this.bufferedAhead(t);if(remaining<this.aheadSecondsTarget()&&!this.fillExhausted()){this.filling=undefined;this.fillController=undefined;this.requestFill(t,true);return;}if(this.buffering&&this.streamAtEnd(this.pausedAt)){this.finishEnded();return;}}).catch(e=>{if((e as Error).name!=="AbortError"&&this.filling===promise&&loadGeneration===this.loadGeneration&&seekGeneration===this.seekGeneration&&!this.destroyed)this.failStreaming(e instanceof Error?e:new Error(String(e)));}).finally(()=>{if(this.filling===promise){this.filling=undefined;if(this.fillController===controller)this.fillController=undefined;this.tryResumeFromBuffering(loadGeneration,seekGeneration);}});this.filling=promise;}
   private invalidateStreamingVideoDecoder():void{ this.streamingDecoderGeneration=undefined; this.videoDecoderClient?.invalidateStreaming(); }
   private async decodeStreamingVideo(chunks:Uint8Array[],mediaFrames:number[],frameRate:number,flush:boolean,loadGeneration:number,seekGeneration:number):Promise<RenderFrame[]> {
     const maxMediaFrame=Math.ceil(this.durationValue*frameRate);
@@ -281,18 +373,29 @@ export class PlayerEngine {
     for(const packet of packets){if(!group.length)groupStart=packet.presentationTime;group.push(packet);if(packet.presentationTime+1/fps-groupStart>=.75)flush();}flush();if(!current())return false;this.audioBytesLoaded+=packets.reduce((sum,p)=>sum+p.data.length,0);const selectedIndex=this.essenceIndex.packets.filter(packet=>packet.kind==="audio"&&packet.trackNumber===this.selectedAudioTrackNumber),lastPacket=selectedIndex.at(-1);this.audioQueuedThroughTime=Math.max(this.audioQueuedThroughTime,(endFrame+1)/fps);this.lastAudioTime=lastPacket?Math.min(this.durationValue,(lastPacket.editUnit+1)/fps):mediaTime;if(!lastPacket||endFrame>=lastPacket.editUnit)this.audioExhausted=true;const known=new Set(this.audioChunks.map(chunk=>chunk.mediaStartTime.toFixed(6)));for(const chunk of fresh)if(!known.has(chunk.mediaStartTime.toFixed(6)))this.audioChunks.push(chunk);this.audioChunks.sort((a,b)=>a.mediaStartTime-b.mediaStartTime);this.publishDiagnostics();return true;
   }
   private stopStreamingAudioSources():void{for(const range of this.scheduledAudio??[]){try{range.sourceNode.stop();}catch{/* already stopped */}try{range.sourceNode.disconnect();}catch{/* disconnected */}range.ended=true;}this.scheduledAudio=[];for(const chunk of this.audioChunks??[])chunk.scheduled=false;this.audioMediaAnchor=undefined;this.audioContextAnchor=undefined;}
-  private scheduleStreamingChunk(chunk:StreamingAudioChunk,mediaTime:number):void{if(!this.audio||this.audioMediaAnchor===undefined||this.audioContextAnchor===undefined||chunk.scheduled||chunk.generation!==this.seekGeneration||chunk.mediaEndTime<=mediaTime||chunk.mediaStartTime>=this.durationValue)return;const start=Math.max(mediaTime,chunk.mediaStartTime),offset=start-chunk.mediaStartTime,end=Math.min(chunk.mediaEndTime,this.durationValue);if(end<=start)return;let contextStart=this.audioContextAnchor+(start-this.audioMediaAnchor);const previous=this.scheduledAudio.at(-1);if(previous){const previousEnd=previous.contextStartTime+previous.mediaEndTime-previous.mediaStartTime;if(Math.abs(contextStart-previousEnd)<.002)contextStart=previousEnd;if(contextStart<previousEnd-.002)return;}const node=this.audio.createBufferSource();node.buffer=chunk.buffer;node.connect(this.audio.destination);const range:ScheduledAudio={mediaStartTime:start,mediaEndTime:end,contextStartTime:contextStart,sourceNode:node,generation:this.seekGeneration,started:true,ended:false};node.onended=()=>{range.ended=true;try{node.disconnect();}catch{/* harmless */}};node.start(contextStart,offset,end-start);chunk.scheduled=true;this.scheduledAudio.push(range);}
+  private scheduleStreamingChunk(chunk:StreamingAudioChunk,mediaTime:number):void{const rate=this.audioPlaybackRate();if(!rate)return;if(!this.audio||this.audioMediaAnchor===undefined||this.audioContextAnchor===undefined||chunk.scheduled||chunk.generation!==this.seekGeneration||chunk.mediaEndTime<=mediaTime||chunk.mediaStartTime>=this.durationValue)return;const start=Math.max(mediaTime,chunk.mediaStartTime),offset=start-chunk.mediaStartTime,end=Math.min(chunk.mediaEndTime,this.durationValue);if(end<=start)return;
+    // Media seconds compress into context seconds by the rate; the buffer offsets stay in media time.
+    let contextStart=this.audioContextAnchor+(start-this.audioMediaAnchor)/rate;const previous=this.scheduledAudio.at(-1);if(previous){const previousEnd=previous.contextStartTime+(previous.mediaEndTime-previous.mediaStartTime)/rate;if(Math.abs(contextStart-previousEnd)<.002)contextStart=previousEnd;if(contextStart<previousEnd-.002)return;}const node=this.audio.createBufferSource();node.buffer=chunk.buffer;if(rate!==1&&node.playbackRate)node.playbackRate.value=rate;node.connect(this.audio.destination);const range:ScheduledAudio={mediaStartTime:start,mediaEndTime:end,contextStartTime:contextStart,sourceNode:node,generation:this.seekGeneration,started:true,ended:false};node.onended=()=>{range.ended=true;try{node.disconnect();}catch{/* harmless */}};node.start(contextStart,offset,end-start);chunk.scheduled=true;this.scheduledAudio.push(range);}
   private resetAndScheduleStreamingAudio(mediaTime:number):void{if(!this.streamingAudioSupported||!this.audio)return;this.stopStreamingAudioSources();this.audioMediaAnchor=mediaTime;this.audioContextAnchor=this.audio.currentTime+.03;for(const chunk of this.audioChunks)this.scheduleStreamingChunk(chunk,mediaTime);}
   private appendStreamingAudioSchedule():void{if(!this.streamingAudioSupported||this.audioMediaAnchor===undefined)return;for(const chunk of this.audioChunks)this.scheduleStreamingChunk(chunk,this.audioMediaAnchor);}
-  private audioReadyAt(time:number):boolean{return !this.streamingAudioSupported||this.audioChunks.some(chunk=>chunk.mediaStartTime<=time+.05&&chunk.mediaEndTime>time)||this.audioExhausted&&time>=this.lastAudioTime-.002;}
-  private tryResumeFromBuffering(load=this.loadGeneration,seek=this.seekGeneration):void{if(this.destroyed||this.status==="error"||!this.buffering||!this.resumeAfterBuffer||load!==this.loadGeneration||seek!==this.seekGeneration||this.filling||this.audioFilling)return;if(!this.frames.some(frame=>frame.time>=this.pausedAt)||!this.audioReadyAt(this.pausedAt))return;this.drawAt(this.pausedAt);this.resetAndScheduleStreamingAudio(this.pausedAt);void this.audio?.resume();const delay=this.audio&&this.audioContextAnchor!==undefined?Math.max(0,this.audioContextAnchor-this.audio.currentTime)*1000:0;this.startedAt=performance.now()+delay-this.pausedAt*1000;this.setBuffering(false);this.setStatus("playing");this.tick();this.schedulePlaybackCheck();}
-  private requestAudioFill(t:number):void{if(!this.streamingAudioSupported||this.audioFilling||this.audioExhausted)return;const end=this.audioChunks?.at(-1)?.mediaEndTime??t;if(end-t>=1.25)return;const controller=new AbortController();this.audioFillController=controller;const load=this.loadGeneration,seek=this.seekGeneration;const promise=this.fillStreamingAudio(end,controller.signal,load,seek).then(applied=>{if(applied&&this.status==="playing")this.appendStreamingAudioSchedule();}).catch(error=>{if((error as Error).name!=="AbortError"&&load===this.loadGeneration&&seek===this.seekGeneration)this.failStreaming(error instanceof Error?error:new Error(String(error)));}).finally(()=>{if(this.audioFilling===promise){this.audioFilling=undefined;this.audioFillController=undefined;this.tryResumeFromBuffering(load,seek);}});this.audioFilling=promise;}
+  /** A muted rate never queues audio, so waiting on the audio queue there would stall forever. */
+  private audioReadyAt(time:number):boolean{return !this.streamingAudioSupported||this.audioPlaybackRate()===0||this.audioChunks.some(chunk=>chunk.mediaStartTime<=time+.05&&chunk.mediaEndTime>time)||this.audioExhausted&&time>=this.lastAudioTime-.002;}
+  private tryResumeFromBuffering(load=this.loadGeneration,seek=this.seekGeneration):void{if(this.destroyed||this.status==="error"||!this.buffering||!this.resumeAfterBuffer||load!==this.loadGeneration||seek!==this.seekGeneration||this.filling||this.audioFilling)return;if(!this.frames.some(frame=>frame.time>=this.pausedAt)||!this.audioReadyAt(this.pausedAt))return;this.drawAt(this.pausedAt);this.resetAndScheduleStreamingAudio(this.pausedAt);void this.resumeAudioIfAudible();const delay=this.audio&&this.audioContextAnchor!==undefined?Math.max(0,this.audioContextAnchor-this.audio.currentTime)*1000:0;this.anchorPlayback(this.pausedAt,delay);this.setBuffering(false);this.setStatus("playing");this.tick();this.schedulePlaybackCheck();}
+  private requestAudioFill(t:number):void{if(!this.streamingAudioSupported||this.audioFilling||this.audioExhausted||this.audioPlaybackRate()===0)return;const end=this.audioChunks?.at(-1)?.mediaEndTime??t;if(end-t>=1.25)return;const controller=new AbortController();this.audioFillController=controller;const load=this.loadGeneration,seek=this.seekGeneration;const promise=this.fillStreamingAudio(end,controller.signal,load,seek).then(applied=>{if(applied&&this.status==="playing")this.appendStreamingAudioSchedule();}).catch(error=>{if((error as Error).name!=="AbortError"&&load===this.loadGeneration&&seek===this.seekGeneration)this.failStreaming(error instanceof Error?error:new Error(String(error)));}).finally(()=>{if(this.audioFilling===promise){this.audioFilling=undefined;this.audioFillController=undefined;this.tryResumeFromBuffering(load,seek);}});this.audioFilling=promise;}
   private async preparePcm(chunks: Uint8Array[]): Promise<{audio:AudioContext;audioBuffer:AudioBuffer}> {
     const audio=new AudioContext({sampleRate:48000});
     const bytes=chunks.reduce((n,c)=>n+c.length,0), joined=new Uint8Array(bytes); let at=0;
     for(const c of chunks){joined.set(c,at);at+=c.length;}
     const channels=pcmS24beToFloat32(joined,2), audioBuffer=audio.createBuffer(2,channels[0].length,48000);
     channels.forEach((samples,index)=>audioBuffer.copyToChannel(new Float32Array(samples),index)); await audio.suspend(); return {audio,audioBuffer};
+  }
+  /**
+   * A muted rate has nothing to hear, and resuming an AudioContext needs a user gesture — waiting on
+   * that would make fast and reverse playback refuse to start until the page had been clicked.
+   */
+  private async resumeAudioIfAudible():Promise<void>{
+    if(!this.audio)return;
+    if(this.audioPlaybackRate()>0)await this.audio.resume(); else await this.audio.suspend();
   }
   private stopAudioSource():void { this.stopStreamingAudioSources();const source=this.audioSource;this.audioSource=undefined;if(!source)return;try{source.stop();}catch{/* An AudioBufferSourceNode can only be stopped once on some implementations. */}try{source.disconnect();}catch{/* A disconnected node is already harmless. */} }
   private startAudio(offset:number):void { if(!this.audio||!this.audioBuffer)return; this.stopAudioSource(); const node=this.audio.createBufferSource(); node.buffer=this.audioBuffer; node.connect(this.audio.destination); node.start(0,Math.min(offset,this.audioBuffer.duration)); this.audioSource=node; }
@@ -301,7 +404,8 @@ export class PlayerEngine {
    * must not be tied to rAF: a hidden tab stops rAF while the refill timer keeps queueing frames.
    */
   private evictPlayedMedia(t:number):void{
-    this.evictFramesBefore(t-this.retainBehindSeconds);
+    // In reverse the playhead moves down, so the frames behind it are the ones above t.
+    if(this.isReverse())this.evictFramesAfter(t+this.retainBehindSeconds); else this.evictFramesBefore(t-this.retainBehindSeconds);
     this.audioChunks=(this.audioChunks??[]).filter(chunk=>chunk.mediaEndTime>=t-.1);
     this.scheduledAudio=(this.scheduledAudio??[]).filter(range=>!range.ended&&range.mediaEndTime>=t-.1);
   }
@@ -318,21 +422,73 @@ export class PlayerEngine {
       this.playbackCheckActive=false;
       if(this.destroyed||this.status!=="playing")return;
       const t=this.currentTime;
+      if(this.isReverse()&&t<=0){this.finishReachedStart();return;}
       if(this.mode==="streaming"){
         this.evictPlayedMedia(t);
-        if(this.streamAtEnd(t)){this.finishEnded();return;}
+        if(!this.isReverse()&&this.streamAtEnd(t)){this.finishEnded();return;}
         this.requestFill(t);this.requestAudioFill(t);
       }
-      if(t>=this.durationValue){this.finishEnded();return;}
+      if(!this.isReverse()&&t>=this.durationValue){this.finishEnded();return;}
       this.schedulePlaybackCheck();
     },250);
   }
-  async play(): Promise<void> { if(this.status==="playing")return;if(this.status==="buffering"){this.resumeAfterBuffer=true;return;} if(this.mode==="streaming")this.resetAndScheduleStreamingAudio(this.pausedAt);else this.startAudio(this.pausedAt); await this.audio?.resume(); const delay=this.mode==="streaming"&&this.audio&&this.audioContextAnchor!==undefined?Math.max(0,this.audioContextAnchor-this.audio.currentTime)*1000:0;this.startedAt=performance.now()+delay-this.pausedAt*1000; this.setStatus("playing"); this.tick(); this.schedulePlaybackCheck(); }
+  async play(): Promise<void> { if(this.status==="playing")return;if(this.status==="buffering"){this.resumeAfterBuffer=true;return;} if(this.mode==="streaming")this.resetAndScheduleStreamingAudio(this.pausedAt);else this.startAudio(this.pausedAt); await this.resumeAudioIfAudible(); const delay=this.mode==="streaming"&&this.audio&&this.audioContextAnchor!==undefined?Math.max(0,this.audioContextAnchor-this.audio.currentTime)*1000:0;this.anchorPlayback(this.pausedAt,delay); this.setStatus("playing"); this.tick(); this.schedulePlaybackCheck(); }
   pause(): void { if(this.status!=="playing"&&this.status!=="buffering")return;if(this.status==="playing")this.pausedAt=this.currentTime;this.resumeAfterBuffer=false;this.abortFill();this.setBuffering(false); this.stopAudioSource(); void this.audio?.suspend(); cancelAnimationFrame(this.raf);this.raf=0; this.setStatus("paused"); }
-  async seek(seconds:number,strict=false): Promise<void> { const seekStarted=performance.now(); this.requestedTimecode=null;this.actualDisplayedFrame=null;this.seekElapsedMs=null;this.seekReadBytes=0; const wasPlaying=this.status==="playing"||this.status==="buffering"&&this.resumeAfterBuffer;if(this.status==="playing")this.pausedAt=this.currentTime;cancelAnimationFrame(this.raf);this.raf=0;this.abortFill();this.invalidateStreamingVideoDecoder();this.stopAudioSource();this.setBuffering(false);this.seekController?.abort();const controller=new AbortController();this.seekController=controller;const generation=++this.seekGeneration,loadGeneration=this.loadGeneration,isCurrent=()=>!controller.signal.aborted&&!this.destroyed&&generation===this.seekGeneration&&loadGeneration===this.loadGeneration;this.callbacks.seeking?.(true); try { if(!isCurrent())return;this.pausedAt=Math.max(0,Math.min(this.durationValue,seconds)); const fps=this.essenceIndex?.frameRate??XDCAM_FRAME_RATE; this.requestedFrame=Math.min(Math.max(0,Math.round(this.pausedAt*fps)),Math.max(0,Math.ceil(this.durationValue*fps)-1)); this.pausedAt=this.requestedFrame/fps; this.seekStartFrame=this.requestedFrame; this.prerollFrames=0; this.seekSource=this.mode==="streaming"?"sequential-fallback":null; if(this.mode==="streaming"&&this.essenceIndex){ const point=findSeekPoint(this.indexTables?.[0],this.requestedFrame); this.seekStartFrame=point.editUnit; this.prerollFrames=this.requestedFrame-point.editUnit; this.seekSource=point.source; const before=(this.reader as any)?.getStats?.().bytesLoaded??0;this.resumeAfterBuffer=wasPlaying;this.setStatus("buffering");this.setBuffering(true);this.clearFrames();this.audioChunks=[];this.queuedThroughFrame=-1;await Promise.all([this.fillStreaming(this.requestedFrame,controller.signal,loadGeneration,generation,this.seekStartFrame),this.fillStreamingAudio(this.pausedAt,controller.signal,loadGeneration,generation)]);if(!isCurrent())return; this.seekReadBytes=Math.max(0,Number((this.reader as any)?.getStats?.().bytesLoaded??0)-Number(before));} const displayed=this.drawAt(this.pausedAt,true); if(!displayed||displayed.mediaFrame!==this.requestedFrame)throw new Error(`Requested frame ${this.requestedFrame} was not decoded`); this.actualDisplayedFrame=displayed.mediaFrame; this.seekElapsedMs=performance.now()-seekStarted; this.emitTime(this.pausedAt);if(wasPlaying){if(this.mode==="streaming")this.resetAndScheduleStreamingAudio(this.pausedAt);else this.startAudio(this.pausedAt);await this.audio?.resume();const delay=this.mode==="streaming"&&this.audio&&this.audioContextAnchor!==undefined?Math.max(0,this.audioContextAnchor-this.audio.currentTime)*1000:0;this.startedAt=performance.now()+delay-this.pausedAt*1000;this.setStatus("playing");this.tick();this.schedulePlaybackCheck();}else if(this.mode==="streaming")this.setStatus("paused"); } catch(error){if((error as Error).name==="AbortError"||!isCurrent())return;const failure=error instanceof Error?error:new Error(String(error));this.failStreaming(failure);if(strict)throw failure;return;} finally { if(isCurrent()){this.setBuffering(false);this.callbacks.seeking?.(false);} } }
+  async seek(seconds:number,strict=false): Promise<void> { const seekStarted=performance.now(); this.requestedTimecode=null;this.actualDisplayedFrame=null;this.seekElapsedMs=null;this.seekReadBytes=0; const wasPlaying=this.status==="playing"||this.status==="buffering"&&this.resumeAfterBuffer;if(this.status==="playing")this.pausedAt=this.currentTime;cancelAnimationFrame(this.raf);this.raf=0;this.abortFill();this.invalidateStreamingVideoDecoder();this.stopAudioSource();this.setBuffering(false);this.seekController?.abort();const controller=new AbortController();this.seekController=controller;const generation=++this.seekGeneration,loadGeneration=this.loadGeneration,isCurrent=()=>!controller.signal.aborted&&!this.destroyed&&generation===this.seekGeneration&&loadGeneration===this.loadGeneration;this.callbacks.seeking?.(true); try { if(!isCurrent())return;this.pausedAt=Math.max(0,Math.min(this.durationValue,seconds)); const fps=this.essenceIndex?.frameRate??XDCAM_FRAME_RATE; this.requestedFrame=Math.min(Math.max(0,Math.round(this.pausedAt*fps)),Math.max(0,Math.ceil(this.durationValue*fps)-1)); this.pausedAt=this.requestedFrame/fps; this.seekStartFrame=this.requestedFrame; this.prerollFrames=0; this.seekSource=this.mode==="streaming"?"sequential-fallback":null; if(this.mode==="streaming"&&this.essenceIndex){ const point=findSeekPoint(mergeIndexTables(this.indexTables??[]),this.requestedFrame); this.seekStartFrame=point.editUnit; this.prerollFrames=this.requestedFrame-point.editUnit; this.seekSource=point.source; const before=(this.reader as any)?.getStats?.().bytesLoaded??0;this.resumeAfterBuffer=wasPlaying;this.setStatus("buffering");this.setBuffering(true);this.clearFrames();this.audioChunks=[];this.queuedThroughFrame=-1;this.keyFrameCoverage=undefined;const decimated=this.frameSelection()==="key-frames";await Promise.all([decimated?this.fillKeyFrames(this.requestedFrame,controller.signal,loadGeneration,generation):this.fillStreaming(this.requestedFrame,controller.signal,loadGeneration,generation,this.seekStartFrame),this.fillStreamingAudio(this.pausedAt,controller.signal,loadGeneration,generation)]);if(!isCurrent())return; this.seekReadBytes=Math.max(0,Number((this.reader as any)?.getStats?.().bytesLoaded??0)-Number(before));} const displayed=this.landOnFrame(); if(!displayed)throw new Error(`Requested frame ${this.requestedFrame} was not decoded`); this.actualDisplayedFrame=displayed.mediaFrame; this.seekElapsedMs=performance.now()-seekStarted; this.publishDiagnostics(); this.emitTime(this.pausedAt);if(wasPlaying){if(this.mode==="streaming")this.resetAndScheduleStreamingAudio(this.pausedAt);else this.startAudio(this.pausedAt);await this.resumeAudioIfAudible();const delay=this.mode==="streaming"&&this.audio&&this.audioContextAnchor!==undefined?Math.max(0,this.audioContextAnchor-this.audio.currentTime)*1000:0;this.anchorPlayback(this.pausedAt,delay);this.setStatus("playing");this.tick();this.schedulePlaybackCheck();}else if(this.mode==="streaming")this.setStatus("paused"); } catch(error){if((error as Error).name==="AbortError"||!isCurrent())return;const failure=error instanceof Error?error:new Error(String(error));this.failStreaming(failure);if(strict)throw failure;return;} finally { if(isCurrent()){this.setBuffering(false);this.callbacks.seeking?.(false);} } }
+  /** Media frame currently displayed, or the one the playhead sits on when paused. */
+  /**
+   * Rate is signed: negative plays backwards. A single value has no invalid combinations the way a
+   * rate plus a direction flag would, and the media clock is then just anchor + elapsed * rate.
+   * Zero would mean "playing but not moving", so it is rejected; pause() is how playback stops.
+   */
+  async setPlaybackRate(rate:number):Promise<void>{
+    if(!Number.isFinite(rate)||rate===0)throw new RangeError("playbackRate must be a non-zero finite number; call pause() to stop");
+    if(rate===this.playbackRateValue)return;
+    const before=this.frameSelection(),wasReverse=this.isReverse(),at=this.currentTime;
+    this.playbackRateValue=rate;
+    // A changed selection mode or direction makes the queue the wrong shape: it holds every frame
+    // when only key frames are wanted, or covers the side the playhead is moving away from. Re-seek
+    // to refill it; a rate change within one mode only needs the clock re-anchored.
+    if(this.mode==="streaming"&&(this.frameSelection()!==before||this.isReverse()!==wasReverse)){
+      this.keyFrameCoverage=undefined;
+      await this.seek(at);
+    } else if(this.status==="playing"){
+      this.anchorPlayback(at);
+      if(this.mode==="streaming")this.resetAndScheduleStreamingAudio(at); else this.startAudio(at);
+    }
+    this.publishDiagnostics();
+  }
+  private currentMediaFrame():number { const fps=this.essenceIndex?.frameRate??XDCAM_FRAME_RATE; return Math.round(this.currentTime*fps); }
+  /**
+   * Frame stepping is a paused-inspection gesture, so it pauses first rather than fighting the
+   * clock: without that the playhead advances past the requested frame before the seek lands.
+   */
+  async stepFrame(frames=1):Promise<void>{
+    if(this.status==="playing"||this.status==="buffering")this.pause();
+    const fps=this.essenceIndex?.frameRate??XDCAM_FRAME_RATE,last=Math.max(0,Math.ceil(this.durationValue*fps)-1);
+    await this.seek(Math.min(last,Math.max(0,this.currentMediaFrame()+Math.trunc(frames)))/fps);
+  }
+  /** Relative skip. Clamped to the media, and it keeps playing if it was playing. */
+  async seekRelative(seconds:number):Promise<void>{ await this.seek(Math.min(this.durationValue,Math.max(0,this.currentTime+seconds))); }
   async seekTimecode(value:string):Promise<void>{ if(!this.timecodeInfo) throw new Error("timecode-track-unavailable"); this.requestedTimecode=null; const fps=this.essenceIndex?.frameRate??this.timecodeInfo.editRateNumerator/this.timecodeInfo.editRateDenominator,maxFrames=Math.ceil(this.durationValue*fps); const frame=timecodeToMediaFrame({...this.timecodeInfo,durationFrames:this.timecodeInfo.durationFrames===undefined?maxFrames:Math.min(this.timecodeInfo.durationFrames,maxFrames)},value), expectedGeneration=this.seekGeneration+1; await this.seek(frame/fps,true); if(expectedGeneration!==this.seekGeneration||this.destroyed)return; this.requestedTimecode=value; this.requestedFrame=frame; this.publishDiagnostics(); }
+  /**
+   * Where a seek actually lands. Decoding every frame lands on the requested frame or fails, but a
+   * decimated rate can only land on a key frame, so it takes the nearest one and moves the playhead
+   * there rather than reporting a miss.
+   */
+  private landOnFrame():RenderFrame|undefined{
+    if(this.mode!=="streaming"||this.frameSelection()==="all-frames"){
+      const exact=this.drawAt(this.pausedAt,true);
+      return exact&&exact.mediaFrame===this.requestedFrame?exact:undefined;
+    }
+    let nearest:RenderFrame|undefined;
+    for(const item of this.frames)if(!nearest||Math.abs(item.time-this.pausedAt)<Math.abs(nearest.time-this.pausedAt))nearest=item;
+    if(!nearest)return undefined;
+    this.pausedAt=nearest.time;this.drawFrame(nearest.frame);
+    return nearest;
+  }
   private emitTime(t:number){this.callbacks.time(t);this.callbacks.timecode?.(this.timecodeInfo ? timecodeAtSeconds(this.timecodeInfo,t) : null);}
-  private drawAt(t:number,exact=false):RenderFrame|undefined{const requested=Math.round(t*(this.essenceIndex?.frameRate??XDCAM_FRAME_RATE));let f:RenderFrame|undefined;if(this.mode==="streaming"){if(exact)f=this.frames.find(item=>item.mediaFrame===requested);else for(let i=this.frames.length-1;i>=0;i--){if(this.frames[i].time<=t+.001){f=this.frames[i];break;}}}else f=this.frames[Math.min(this.frames.length-1,Math.floor(t*XDCAM_FRAME_RATE))];if(f)this.drawFrame(f.frame);return f;}
-  private tick():void{if(this.destroyed||this.status!=="playing")return;const t=this.currentTime;if(this.mode==="streaming"){this.evictPlayedMedia(t);if(this.streamAtEnd(t)){this.finishEnded();return;}const hasFuture=this.frames.some(frame=>frame.time>=t),hasAudio=this.audioReadyAt(t);if((!hasFuture||!hasAudio)&&t<this.durationValue){this.pausedAt=Math.min(t,this.durationValue);this.resumeAfterBuffer=true;cancelAnimationFrame(this.raf);this.raf=0;this.stopStreamingAudioSources();void this.audio?.suspend();this.setStatus("buffering");this.setBuffering(true);this.requestFill(this.pausedAt,true);this.requestAudioFill(this.pausedAt);return;}this.requestFill(t);this.requestAudioFill(t);}this.drawAt(t);this.emitTime(t);if(t>=this.durationValue){this.finishEnded();return;}this.raf=requestAnimationFrame(()=>this.tick());}
+  private drawAt(t:number,exact=false):RenderFrame|undefined{const requested=Math.round(t*(this.essenceIndex?.frameRate??XDCAM_FRAME_RATE));let f:RenderFrame|undefined;if(this.mode==="streaming"){if(exact)f=this.frames.find(item=>item.mediaFrame===requested);else if(this.isReverse())f=this.frames.find(item=>item.time>=t-.001);else for(let i=this.frames.length-1;i>=0;i--){if(this.frames[i].time<=t+.001){f=this.frames[i];break;}}}else f=this.frames[Math.min(this.frames.length-1,Math.floor(t*XDCAM_FRAME_RATE))];if(f)this.drawFrame(f.frame);return f;}
+  private tick():void{if(this.destroyed||this.status!=="playing")return;const t=this.currentTime;if(this.mode==="streaming"){this.evictPlayedMedia(t);if(this.isReverse()){if(t<=0){this.finishReachedStart();return;}}else if(this.streamAtEnd(t)){this.finishEnded();return;}const hasFuture=this.isReverse()?this.frames.some(frame=>frame.time<=t)||this.fillExhausted():this.frames.some(frame=>frame.time>=t),hasAudio=this.audioReadyAt(t);if((!hasFuture||!hasAudio)&&t<this.durationValue){this.pausedAt=Math.min(t,this.durationValue);this.resumeAfterBuffer=true;cancelAnimationFrame(this.raf);this.raf=0;this.stopStreamingAudioSources();void this.audio?.suspend();this.setStatus("buffering");this.setBuffering(true);this.requestFill(this.pausedAt,true);this.requestAudioFill(this.pausedAt);return;}this.requestFill(t);this.requestAudioFill(t);}this.drawAt(t);this.emitTime(t);if(!this.isReverse()&&t>=this.durationValue){this.finishEnded();return;}this.raf=requestAnimationFrame(()=>this.tick());}
   destroy():void{this.destroyed=true;this.loadGeneration++;this.seekGeneration++;this.abortFill();this.invalidateStreamingVideoDecoder();this.setBuffering(false);this.loadController?.abort();this.seekController?.abort();cancelAnimationFrame(this.raf);this.raf=0;this.stopAudioSource();this.releaseReader();void this.audio?.close();this.audio=undefined;this.audioChunks=[];this.scheduledAudio=[];this.audioMediaAnchor=undefined;this.audioContextAnchor=undefined;this.clearFrames();this.videoDecoderClient?.dispose();}
 }
