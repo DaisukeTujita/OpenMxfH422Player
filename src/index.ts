@@ -1,5 +1,7 @@
 export { H422Player } from "./H422Player";
 export { DEFAULT_VIDEO_QUEUE_MAX_BYTES, DEFAULT_FULL_DECODE_MAX_RATE } from "./engine";
+export { WAITING_PLAYER_STATES, derivePlayerState, isWaitingPlayerState } from "./player-state";
+export { AUDIO_LEVEL_MAX_CHANNELS, AUDIO_LEVEL_SILENCE_DB, DEFAULT_AUDIO_LEVEL_INTERVAL_MS, toDecibels } from "./audio-levels";
 export { parseMxf, readBer } from "./mxf";
 export { parseMxfMetadata } from "./mxf-metadata";
 export { parseMxfMetadataFromReader } from "./mxf-reader";
@@ -15,4 +17,4 @@ export type { KlvHeader } from "./klv-reader";
 export type { MxfIndexEntry, MxfIndexTable, SeekPoint } from "./mxf-index";
 export type { EssenceIndex, EssenceIndexEntry, EssenceRangeOptions, ReadEssencePacket } from "./essence-reader";
 export type { MxfTimecodeInfo, TimecodeConversionError, TimecodePosition } from "./timecode";
-export type { H422PlayerHandle, H422PlayerProps, PlaybackMode, VideoRenderMode, PlayerDiagnostics, PlayerInfo, PlayerStatus } from "./types";
+export type { H422PlayerHandle, H422PlayerProps, PlaybackMode, VideoRenderMode, PlayerDiagnostics, PlayerInfo, PlayerStatus, PlayerState, FrameSelection, PlaybackRateChangeInfo, AudioChannelLevel, AudioLevels } from "./types";

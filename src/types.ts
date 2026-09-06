@@ -1,6 +1,44 @@
 export type PlayerStatus = "idle" | "loading" | "ready" | "playing" | "paused" | "buffering" | "ended" | "error";
+/**
+ * `PlayerStatus` plus the waiting states that were previously only reachable by combining it with
+ * `onSeekingChange` / `onBufferingChange`. One subscribable value is what a host needs to decide
+ * "spinner or not", so the library composes it instead of leaving every host to compose it again.
+ */
+export type PlayerState = "idle" | "loading" | "ready" | "seeking" | "buffering" | "playing" | "paused" | "ended" | "error";
 export type PlaybackMode = "streaming" | "legacy";
 export type VideoRenderMode = "rgba" | "yuv-webgl";
+export type FrameSelection = "all-frames" | "key-frames";
+
+/** What changed alongside the rate, so a host does not have to re-derive it from the diagnostics. */
+export interface PlaybackRateChangeInfo {
+  /** Signed: negative is reverse. */
+  rate: number;
+  /** Whether that rate is decoding every frame or only random-access frames. */
+  frameSelection: FrameSelection;
+  /** 0 when the rate mutes audio, which every decimated and every reverse rate does. */
+  audioPlaybackRate: number;
+}
+
+/**
+ * Sample peak and RMS of one channel over the measurement window. Linear values are 0..1 for
+ * material that does not exceed full scale; the dB fields are dBFS, floored at
+ * `AUDIO_LEVEL_SILENCE_DB` so a meter can scale them without special-casing -Infinity.
+ */
+export interface AudioChannelLevel {
+  peak: number;
+  rms: number;
+  peakDb: number;
+  rmsDb: number;
+}
+
+export interface AudioLevels {
+  /** Media time the window starts at, in seconds. */
+  time: number;
+  /** Length of the measured window in media seconds. */
+  windowSeconds: number;
+  /** First channel first. At most two entries: channels beyond 1ch/2ch are never measured. */
+  channels: AudioChannelLevel[];
+}
 
 export interface PlayerDiagnostics {
   mode: PlaybackMode; videoRenderMode: VideoRenderMode; fileSize: number; bytesLoaded: number; underlyingReadCount: number;
@@ -55,6 +93,13 @@ export interface H422PlayerHandle {
   readonly playbackRate: number;
   readonly currentTime: number;
   readonly duration: number;
+  /** Composed playback state, including the waiting states a host shows a spinner for. */
+  readonly state: PlayerState;
+  /** Latest measured levels, or null while measurement is disabled. */
+  getAudioLevels(): AudioLevels | null;
+  /** Turns measurement on or off at runtime. Disabled means no measurement work at all. */
+  setAudioLevelsEnabled(enabled: boolean): void;
+  readonly audioLevelsEnabled: boolean;
   getDiagnostics(): PlayerDiagnostics;
 }
 
@@ -85,6 +130,18 @@ export interface H422PlayerProps {
    * gets faster. Defaults to DEFAULT_FULL_DECODE_MAX_RATE.
    */
   fullDecodeMaxRate?: number;
+  /**
+   * Measures the level of the first two audio channels while playing. Off by default: metering a
+   * stream nobody displays is pure overhead. Toggling this prop starts and stops the measurement
+   * itself, so a host that hides its meter stops paying for it.
+   */
+  enableAudioLevels?: boolean;
+  /**
+   * How often levels are measured and reported, in milliseconds. Also the length of the measured
+   * window. Read once when the player mounts; changing it afterwards has no effect. Defaults to
+   * DEFAULT_AUDIO_LEVEL_INTERVAL_MS.
+   */
+  audioLevelIntervalMs?: number;
   className?: string;
   onReady?: (info: PlayerInfo) => void;
   /** Structural MXF metadata. Missing fields remain undefined rather than receiving playback fallbacks. */
@@ -96,5 +153,11 @@ export interface H422PlayerProps {
   onSeekingChange?: (seeking: boolean) => void;
   onTimeUpdate?: (seconds: number) => void;
   onStatusChange?: (status: PlayerStatus) => void;
+  /** Composed state, including `seeking` and `buffering`. Fires only when the value changes. */
+  onStateChange?: (state: PlayerState) => void;
+  /** Fires for every route that changes the rate or what that rate decodes, including a reload. */
+  onPlaybackRateChange?: (rate: number, info: PlaybackRateChangeInfo) => void;
+  /** Periodic levels for 1ch/2ch while `enableAudioLevels` is on. Silent when nothing is audible. */
+  onAudioLevelUpdate?: (levels: AudioLevels) => void;
   onError?: (error: Error) => void;
 }

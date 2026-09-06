@@ -1,26 +1,53 @@
 import { useRef, useState } from "react";
 import {
+  AUDIO_LEVEL_SILENCE_DB,
   H422Player,
   formatTimecodeFrame,
+  isWaitingPlayerState,
+  type AudioChannelLevel,
+  type AudioLevels,
   type H422PlayerHandle,
   type MxfMediaInfo,
   type PlayerInfo,
-  type PlayerStatus,
+  type PlayerState,
   type PlaybackMode,
   type VideoRenderMode,
   type PlayerDiagnostics,
 } from "@openmxf/h422-player";
 
-const statusLabels: Record<PlayerStatus, string> = {
+const stateLabels: Record<PlayerState, string> = {
   idle: "待機中",
   loading: "読み込み中",
   ready: "再生準備完了",
+  seeking: "シーク中",
   playing: "再生中",
   paused: "一時停止中",
   ended: "再生終了",
   error: "エラー",
   buffering: "バッファリング中",
 };
+
+/** Meter scale. -60 dBFS is the bottom of the bar; the library floors its values lower than that. */
+const METER_FLOOR_DB = -60;
+
+const meterHeight = (db: number) => `${Math.round(Math.max(0, Math.min(1, (db - METER_FLOOR_DB) / -METER_FLOOR_DB)) * 100)}%`;
+
+/** Peak colouring is the demo's choice, not the library's: green up to -12, amber, red near clip. */
+const meterTone = (db: number) => (db >= -3 ? "clip" : db >= -12 ? "warn" : "ok");
+
+function LevelMeter({ label, level }: { label: string; level?: AudioChannelLevel }) {
+  const peakDb = level?.peakDb ?? AUDIO_LEVEL_SILENCE_DB, rmsDb = level?.rmsDb ?? AUDIO_LEVEL_SILENCE_DB;
+  return (
+    <div className="level-meter">
+      <div className="level-track" role="meter" aria-label={`${label} 音声レベル`} aria-valuemin={METER_FLOOR_DB} aria-valuemax={0} aria-valuenow={Math.max(METER_FLOOR_DB, Math.round(peakDb))}>
+        <div className={`level-fill level-${meterTone(rmsDb)}`} style={{ height: meterHeight(rmsDb) }} />
+        <div className={`level-peak level-${meterTone(peakDb)}`} style={{ bottom: meterHeight(peakDb) }} />
+      </div>
+      <span className="level-label">{label}</span>
+      <span className="level-value">{peakDb <= METER_FLOOR_DB ? "-∞" : peakDb.toFixed(0)}</span>
+    </div>
+  );
+}
 
 const obtained = (value: string | number | undefined) => value ?? "未取得";
 
@@ -36,7 +63,7 @@ const formatTime = (seconds: number) => {
 export function App() {
   const playerRef = useRef<H422PlayerHandle>(null);
   const [file, setFile] = useState<File>();
-  const [status, setStatus] = useState<PlayerStatus>("idle");
+  const [playerState, setPlayerState] = useState<PlayerState>("idle");
   const [error, setError] = useState("");
   const [info, setInfo] = useState<PlayerInfo>();
   const [currentTime, setCurrentTime] = useState(0);
@@ -44,8 +71,9 @@ export function App() {
   const [timecode, setTimecode] = useState<string | null>(null);
   const [timecodeInput, setTimecodeInput] = useState("");
   const [timecodeError, setTimecodeError] = useState("");
-  const [seeking, setSeeking] = useState(false);
   const [rate, setRate] = useState(1);
+  const [audioLevels, setAudioLevels] = useState<AudioLevels>();
+  const [meterEnabled, setMeterEnabled] = useState(false);
 
   const [buffering, setBuffering] = useState(false);
   const [mode,setMode]=useState<PlaybackMode>("streaming");
@@ -64,8 +92,9 @@ export function App() {
     setCurrentTime(0);
     setMediaInfo(undefined);
     setTimecode(null);
-    setStatus(nextFile ? "loading" : "idle");
+    setPlayerState(nextFile ? "loading" : "idle");
     setBuffering(false);
+    setAudioLevels(undefined);
   };
 
   const play = async () => {
@@ -97,8 +126,9 @@ export function App() {
     }
   };
 
-  // The library reports seeking and buffering as state; deciding what to disable is the host's job.
-  const transportBusy = !info || seeking || buffering || status === "loading" || status === "error";
+  // The library composes the waiting states; deciding what to disable and what to spin is the host's job.
+  const waiting = isWaitingPlayerState(playerState);
+  const transportBusy = !info || waiting || playerState === "error";
 
   return (
     <main>
@@ -129,24 +159,41 @@ export function App() {
 
       <section className="viewer" aria-label="MXF player">
         {file ? (
-          <H422Player
-            key={`${file.name}-${file.lastModified}-${mode}-${videoRenderMode}`}
-            ref={playerRef}
-            src={file}
-            controls={false}
-            libavBase="/libav"
-            mode={mode}
-            videoRenderMode={videoRenderMode}
-            onDiagnostics={setDiagnostics}
-            onBufferingChange={setBuffering}
-            onReady={setInfo}
-            onMediaInfo={setMediaInfo}
-            onTimecode={setTimecode}
-            onSeekingChange={setSeeking}
-            onTimeUpdate={setCurrentTime}
-            onStatusChange={setStatus}
-            onError={(nextError) => setError(nextError.message)}
-          />
+          <div className="viewer-stage">
+            <H422Player
+              key={`${file.name}-${file.lastModified}-${mode}-${videoRenderMode}`}
+              ref={playerRef}
+              className="player-surface"
+              src={file}
+              controls={false}
+              libavBase="/libav"
+              mode={mode}
+              videoRenderMode={videoRenderMode}
+              enableAudioLevels={meterEnabled}
+              onDiagnostics={setDiagnostics}
+              onBufferingChange={setBuffering}
+              onReady={setInfo}
+              onMediaInfo={setMediaInfo}
+              onTimecode={setTimecode}
+              onTimeUpdate={setCurrentTime}
+              onStateChange={setPlayerState}
+              onPlaybackRateChange={setRate}
+              onAudioLevelUpdate={setAudioLevels}
+              onError={(nextError) => setError(nextError.message)}
+            />
+            {meterEnabled && (
+              <div className="level-meters" aria-label="音声レベルメーター">
+                <LevelMeter label="1ch" level={audioLevels?.channels[0]} />
+                <LevelMeter label="2ch" level={audioLevels?.channels[1]} />
+              </div>
+            )}
+            {waiting && (
+              <div className="loading-overlay" role="status">
+                <span className="spinner" aria-hidden="true" />
+                <span>{stateLabels[playerState]}</span>
+              </div>
+            )}
+          </div>
         ) : (
           <div className="empty-state">MXFを選択すると、ここに映像が表示されます</div>
         )}
@@ -166,14 +213,18 @@ export function App() {
         </div>
         {timecodeError && <p className="timecode-error">{timecodeError}</p>}
         <div className="button-row">
-          <button type="button" disabled={!file || status === "loading" || status === "error"} onClick={() => void play()}>再生</button>
-          <button type="button" disabled={status !== "playing"} onClick={() => playerRef.current?.pause()}>一時停止</button>
-          <button type="button" disabled={!info} onClick={() => void stop()}>停止</button>
+          <button type="button" disabled={transportBusy || playerState === "playing"} onClick={() => void play()}>再生</button>
+          <button type="button" disabled={playerState !== "playing"} onClick={() => playerRef.current?.pause()}>一時停止</button>
+          <button type="button" disabled={transportBusy} onClick={() => void stop()}>停止</button>
+          <button type="button" aria-pressed={meterEnabled} onClick={() => setMeterEnabled(value => !value)}>
+            音声メーター {meterEnabled ? "ON" : "OFF"}
+          </button>
         </div>
         <div className="button-row">
+          {/* The selected speed comes from the library's onPlaybackRateChange, not from the click. */}
           {[-4, -2, -1.5, 1, 1.5, 2, 4].map(value => (
-            <button key={value} type="button" disabled={transportBusy} aria-pressed={rate === value}
-              onClick={() => { setRate(value); void playerRef.current?.setPlaybackRate(value); }}>
+            <button key={value} type="button" className={rate === value ? "selected" : undefined} disabled={transportBusy} aria-pressed={rate === value}
+              onClick={() => void playerRef.current?.setPlaybackRate(value)}>
               {value > 0 ? `${value}x` : `${Math.abs(value)}x 逆`}
             </button>
           ))}
@@ -193,7 +244,7 @@ export function App() {
             max={info?.duration ?? 0}
             step="0.04"
             value={Math.min(currentTime, info?.duration ?? 0)}
-            disabled={!info}
+            disabled={transportBusy}
             onChange={(event) => seek(Number(event.target.value))}
           />
           <span>{formatTime(info?.duration ?? 0)}</span>
@@ -201,7 +252,7 @@ export function App() {
       </section>
 
       <section className="status-grid" aria-live="polite">
-        <div className="panel playback-summary"><h2>再生状態</h2><strong className={`status status-${status}`}>{seeking ? "シーク中" : statusLabels[status]}</strong><p>再生位置: {formatTime(currentTime)}</p><p>タイムコード: {timecode ?? "タイムコードなし"}</p><h2 className="error-heading">エラー</h2><p className={error ? "status-error-message" : undefined}>{error || "エラーはありません"}</p></div>
+        <div className="panel playback-summary"><h2>再生状態</h2><strong className={`status status-${playerState}`}>{stateLabels[playerState]}</strong><p>再生速度: {rate > 0 ? `${rate}x` : `${Math.abs(rate)}x 逆`}</p><p>音声メーター: {meterEnabled ? "計測中" : "停止"}</p><p>再生位置: {formatTime(currentTime)}</p><p>タイムコード: {timecode ?? "タイムコードなし"}</p><h2 className="error-heading">エラー</h2><p className={error ? "status-error-message" : undefined}>{error || "エラーはありません"}</p></div>
         <div className="panel media-inspection">
           <h2>MXF解析情報</h2>
           <dl>
@@ -219,7 +270,7 @@ export function App() {
             <dt>Index Table</dt><dd>{mediaInfo ? `${mediaInfo.indexTableCount > 0 ? "あり" : "なし"}（${mediaInfo.indexTableCount} table / ${mediaInfo.indexEntryCount} entries）` : "未取得"}</dd>
           </dl>
         </div>
-        <div className="panel streaming-diagnostics"><h2>Streaming診断</h2><p>方式: {mode} / 描画: {diagnostics?.videoRenderMode??videoRenderMode} / 描画実装: {diagnostics?.rendererBackend??"-"}</p><p>速度: {diagnostics?.playbackRate??rate}x / フレーム選択: {diagnostics?.frameSelection??"-"} / 音声速度: {diagnostics?.audioPlaybackRate===0?"ミュート":`${diagnostics?.audioPlaybackRate??1}x`}</p><p>実行: {diagnostics?.decoderExecution??"-"} / 適応バッファ: {diagnostics?.adaptiveVideoAheadSeconds?.toFixed(1)??"-"}s / 補充開始: 残り{diagnostics?.adaptiveRefillThresholdSeconds?.toFixed(1)??"-"}s / 再利用プール: {diagnostics?.pooledVideoFrames??0} frames</p><p>映像性能: decode {diagnostics?.videoDecodeMs.toFixed(1)??"-"} ms / RGBA変換 {diagnostics?.videoColorConvertMs.toFixed(1)??"-"} ms / GPU転送・描画 {diagnostics?.videoUploadMs.toFixed(1)??"-"} ms / {diagnostics?.videoDecodedFrames??0} frames</p><p>TC Track: {diagnostics?.selectedTimecodeTrack??"なし"} / {diagnostics?.timecodeSelectionReason??"-"}</p><p>seek: requested {diagnostics?.requestedTimecode??diagnostics?.requestedFrame??"-"} / actual {diagnostics?.actualDisplayedFrame??"-"} / start {diagnostics?.seekStartFrame??"-"} / preroll {diagnostics?.prerollFrames??0} / {diagnostics?.seekSource??"-"}</p><p>seek I/O: {diagnostics?.seekReadBytes??0} bytes / {diagnostics?.seekElapsedMs?.toFixed(1)??"-"} ms</p><p>ファイル: {diagnostics?.fileSize??0} bytes</p><p>Reader: {diagnostics?.bytesLoaded??0} bytes / {diagnostics?.underlyingReadCount??0} reads</p><p>キャッシュ: {diagnostics?.cacheBytes??0} bytes</p><p>映像キュー: {diagnostics?.videoQueueFrames??0} frames ({diagnostics?.videoQueueStart?.toFixed(2)??"-"}–{diagnostics?.videoQueueEnd?.toFixed(2)??"-"}s)</p><p>音声状態: {mode!=="streaming"?"legacy":buffering?"buffering中":diagnostics?.streamingAudioSupported?(status==="playing"?"対応・再生中":"対応"):mediaInfo?.audio?"未対応形式のため映像のみ":"音声なし"}</p><p>音声形式: {diagnostics?.audioSampleRate??"-"} Hz / {diagnostics?.audioChannels??"-"} ch / track {diagnostics?.selectedAudioTrackNumber??"-"}</p><p>音声キュー: {diagnostics?.audioQueueStart?.toFixed(2)??"-"}–{diagnostics?.audioQueueEnd?.toFixed(2)??"-"}s / {diagnostics?.scheduledAudioRanges??0} nodes / {diagnostics?.audioBytesLoaded??0} bytes / {diagnostics?.audioExhausted?"終端":"補充中"}</p><p>形式判定: {diagnostics?.audioFormatBasis??"-"}</p><p>A/V drift: {diagnostics?.audioVideoDriftMs?.toFixed(1)??"-"} ms</p><p>世代: load {diagnostics?.loadGeneration??0} / seek {diagnostics?.seekGeneration??0}</p></div>
+        <div className="panel streaming-diagnostics"><h2>Streaming診断</h2><p>方式: {mode} / 描画: {diagnostics?.videoRenderMode??videoRenderMode} / 描画実装: {diagnostics?.rendererBackend??"-"}</p><p>速度: {diagnostics?.playbackRate??rate}x / フレーム選択: {diagnostics?.frameSelection??"-"} / 音声速度: {diagnostics?.audioPlaybackRate===0?"ミュート":`${diagnostics?.audioPlaybackRate??1}x`}</p><p>実行: {diagnostics?.decoderExecution??"-"} / 適応バッファ: {diagnostics?.adaptiveVideoAheadSeconds?.toFixed(1)??"-"}s / 補充開始: 残り{diagnostics?.adaptiveRefillThresholdSeconds?.toFixed(1)??"-"}s / 再利用プール: {diagnostics?.pooledVideoFrames??0} frames</p><p>映像性能: decode {diagnostics?.videoDecodeMs.toFixed(1)??"-"} ms / RGBA変換 {diagnostics?.videoColorConvertMs.toFixed(1)??"-"} ms / GPU転送・描画 {diagnostics?.videoUploadMs.toFixed(1)??"-"} ms / {diagnostics?.videoDecodedFrames??0} frames</p><p>TC Track: {diagnostics?.selectedTimecodeTrack??"なし"} / {diagnostics?.timecodeSelectionReason??"-"}</p><p>seek: requested {diagnostics?.requestedTimecode??diagnostics?.requestedFrame??"-"} / actual {diagnostics?.actualDisplayedFrame??"-"} / start {diagnostics?.seekStartFrame??"-"} / preroll {diagnostics?.prerollFrames??0} / {diagnostics?.seekSource??"-"}</p><p>seek I/O: {diagnostics?.seekReadBytes??0} bytes / {diagnostics?.seekElapsedMs?.toFixed(1)??"-"} ms</p><p>ファイル: {diagnostics?.fileSize??0} bytes</p><p>Reader: {diagnostics?.bytesLoaded??0} bytes / {diagnostics?.underlyingReadCount??0} reads</p><p>キャッシュ: {diagnostics?.cacheBytes??0} bytes</p><p>映像キュー: {diagnostics?.videoQueueFrames??0} frames ({diagnostics?.videoQueueStart?.toFixed(2)??"-"}–{diagnostics?.videoQueueEnd?.toFixed(2)??"-"}s)</p><p>音声状態: {mode!=="streaming"?"legacy":buffering?"buffering中":diagnostics?.streamingAudioSupported?(playerState==="playing"?"対応・再生中":"対応"):mediaInfo?.audio?"未対応形式のため映像のみ":"音声なし"}</p><p>音声形式: {diagnostics?.audioSampleRate??"-"} Hz / {diagnostics?.audioChannels??"-"} ch / track {diagnostics?.selectedAudioTrackNumber??"-"}</p><p>音声キュー: {diagnostics?.audioQueueStart?.toFixed(2)??"-"}–{diagnostics?.audioQueueEnd?.toFixed(2)??"-"}s / {diagnostics?.scheduledAudioRanges??0} nodes / {diagnostics?.audioBytesLoaded??0} bytes / {diagnostics?.audioExhausted?"終端":"補充中"}</p><p>形式判定: {diagnostics?.audioFormatBasis??"-"}</p><p>A/V drift: {diagnostics?.audioVideoDriftMs?.toFixed(1)??"-"} ms</p><p>世代: load {diagnostics?.loadGeneration??0} / seek {diagnostics?.seekGeneration??0}</p></div>
       </section>
     </main>
   );

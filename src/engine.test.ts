@@ -138,7 +138,7 @@ describe("PlayerEngine playback rate", () => {
 
   function engineWith(overrides: Record<string, unknown> = {}) {
     const engine = Object.create(PlayerEngine.prototype) as any;
-    Object.assign(engine, { mode: "streaming", status: "paused", pausedAt: 4, durationValue: 20, playbackRateValue: 1, fullDecodeMaxRate: 1.5, retainBehindSeconds: 1, frames: [], essenceIndex: { frameRate: 30 }, audioChunks: [], scheduledAudio: [], seek: vi.fn().mockResolvedValue(undefined), publishDiagnostics: vi.fn(), resetAndScheduleStreamingAudio: vi.fn(), ...overrides });
+    Object.assign(engine, { callbacks: {}, mode: "streaming", status: "paused", pausedAt: 4, durationValue: 20, playbackRateValue: 1, fullDecodeMaxRate: 1.5, retainBehindSeconds: 1, frames: [], essenceIndex: { frameRate: 30 }, audioChunks: [], scheduledAudio: [], queuedThroughFrame: -1, seek: vi.fn().mockResolvedValue(undefined), publishDiagnostics: vi.fn(), resetAndScheduleStreamingAudio: vi.fn(), invalidateStreamingVideoDecoder: vi.fn(), stopStreamingAudioSources: vi.fn(), resumeAudioIfAudible: vi.fn().mockResolvedValue(undefined), requestFill: vi.fn(), ...overrides });
     return engine;
   }
 
@@ -166,6 +166,51 @@ describe("PlayerEngine playback rate", () => {
   it("re-seeks when the selection mode changes, since the queue is the wrong density", async () => {
     const engine = engineWith({ playbackRateValue: 1 });
     await engine.setPlaybackRate(4);
+    expect(engine.seek).toHaveBeenCalledWith(4);
+  });
+
+  it("notifies the new rate and what it implies, on the route the engine actually acts on", async () => {
+    const playbackRate = vi.fn();
+    const engine = engineWith({ callbacks: { playbackRate }, playbackRateValue: 1 });
+
+    await engine.setPlaybackRate(4);
+    expect(playbackRate).toHaveBeenCalledWith(4, { rate: 4, frameSelection: "key-frames", audioPlaybackRate: 0 });
+
+    await engine.setPlaybackRate(1.5);
+    expect(playbackRate).toHaveBeenLastCalledWith(1.5, { rate: 1.5, frameSelection: "all-frames", audioPlaybackRate: 1.5 });
+
+    await engine.setPlaybackRate(1.5);
+    expect(playbackRate).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps playing through a switch to decimation, because the queue already holds those key frames", async () => {
+    vi.spyOn(performance, "now").mockReturnValue(1000);
+    const engine = engineWith({ status: "playing", playAnchorMedia: 4, playAnchorWall: 1000, frames: [{ time: 4, mediaFrame: 120 }, { time: 8, mediaFrame: 240 }], queuedThroughFrame: 240 });
+
+    await engine.setPlaybackRate(4);
+
+    expect(engine.seek).not.toHaveBeenCalled();
+    // The decimated refill continues after the frames already decoded instead of redoing that span.
+    expect(engine.keyFrameCoverage).toEqual({ from: 120, to: 240 });
+    expect(engine.invalidateStreamingVideoDecoder).toHaveBeenCalledOnce();
+    expect(engine.stopStreamingAudioSources).toHaveBeenCalledOnce();
+    expect(engine.requestFill).toHaveBeenCalledWith(4);
+    expect(engine.playAnchorMedia).toBe(4);
+    expect(engine.status).toBe("playing");
+  });
+
+  it("re-seeks a switch to decimation the queue is too thin to cover", async () => {
+    vi.spyOn(performance, "now").mockReturnValue(1000);
+    const engine = engineWith({ status: "playing", playAnchorMedia: 4, playAnchorWall: 1000, frames: [{ time: 4.2, mediaFrame: 126 }], queuedThroughFrame: 126 });
+
+    await engine.setPlaybackRate(4);
+    expect(engine.seek).toHaveBeenCalledWith(4);
+  });
+
+  it("re-seeks when slowing back down, since the queue holds only key frames", async () => {
+    const engine = engineWith({ playbackRateValue: 4, frames: [{ time: 4, mediaFrame: 120 }], queuedThroughFrame: 240 });
+
+    await engine.setPlaybackRate(1);
     expect(engine.seek).toHaveBeenCalledWith(4);
   });
 
@@ -668,4 +713,108 @@ describe("PlayerEngine streaming audio scheduling regressions",()=>{
 
 describe("PlayerEngine streaming audio format validation",()=>{
   it("falls back to video-only when explicit BlockAlign or coding UL contradicts the profile",()=>{const warn=vi.spyOn(console,"warn").mockImplementation(()=>undefined),close=vi.fn();const engine=Object.create(PlayerEngine.prototype) as any;Object.assign(engine,{audio:{close},audioChunks:[],scheduledAudio:[],essenceIndex:{packets:[{kind:"audio",trackNumber:4}]},muted:false});engine.configureStreamingAudio({audio:{sampleRate:48000,channels:2,bitsPerSample:24,blockAlign:4,essenceCodingUl:"ffffffffffffffffffffffffffffffff"}});expect(engine.streamingAudioSupported).toBe(false);expect(engine.selectedAudioTrackNumber).toBeUndefined();expect(engine.audio).toBeUndefined();expect(close).toHaveBeenCalledOnce();expect(warn).toHaveBeenCalledWith(expect.stringContaining("BlockAlign=4"));});
+});
+
+describe("PlayerEngine composed state", () => {
+  function stateHarness(overrides: Record<string, unknown> = {}) {
+    const state = vi.fn(), seeking = vi.fn(), buffering = vi.fn(), status = vi.fn();
+    const engine = Object.create(PlayerEngine.prototype) as any;
+    Object.assign(engine, { callbacks: { status, ready: vi.fn(), time: vi.fn(), error: vi.fn(), state, seeking, buffering }, status: "paused", seeking: false, buffering: false, ...overrides });
+    return { engine, state, seeking, buffering };
+  }
+
+  it("composes status, seeking and buffering into the one value a host subscribes to", () => {
+    const h = stateHarness();
+
+    h.engine.setSeeking(true);
+    expect(h.engine.state).toBe("seeking");
+    // A seek that has to refill the queue sets buffering too; it is still a seek to the host.
+    h.engine.setBuffering(true);
+    expect(h.engine.state).toBe("seeking");
+    h.engine.setSeeking(false);
+    expect(h.engine.state).toBe("buffering");
+    h.engine.setBuffering(false);
+    expect(h.engine.state).toBe("paused");
+
+    expect(h.state.mock.calls.map(call => call[0])).toEqual(["seeking", "buffering", "paused"]);
+  });
+
+  it("notifies once per actual change, not once per input", () => {
+    const h = stateHarness();
+
+    h.engine.setSeeking(true);
+    h.engine.setSeeking(true);
+    h.engine.setStatus("buffering");
+    expect(h.state).toHaveBeenCalledTimes(1);
+    expect(h.seeking).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports the file read and a failure ahead of anything still in flight", () => {
+    expect(stateHarness({ status: "loading", seeking: true }).engine.state).toBe("loading");
+    expect(stateHarness({ status: "error", seeking: true, buffering: true }).engine.state).toBe("error");
+  });
+});
+
+describe("PlayerEngine audio levels", () => {
+  afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
+
+  const chunk = (start: number, end: number, channels: number[][], sampleRate = 10) => ({
+    mediaStartTime: start, mediaEndTime: end, generation: 3, scheduled: false,
+    buffer: { numberOfChannels: channels.length, length: channels[0].length, sampleRate, getChannelData: (index: number) => new Float32Array(channels[index]) },
+  });
+
+  function harness(overrides: Record<string, unknown> = {}) {
+    const audioLevels = vi.fn();
+    const engine = Object.create(PlayerEngine.prototype) as any;
+    Object.assign(engine, {
+      callbacks: { status: vi.fn(), ready: vi.fn(), time: vi.fn(), error: vi.fn(), audioLevels },
+      mode: "streaming", status: "playing", playAnchorMedia: 0, playAnchorWall: 1000, durationValue: 20,
+      playbackRateValue: 1, fullDecodeMaxRate: 1.5, streamingAudioSupported: true, audioSampleRate: 10,
+      audioChunks: [chunk(0, 1, [[1, 0, 0, 0, 0, 0, 0, 0, 0, 0], [0.5, 0, 0, 0, 0, 0, 0, 0, 0, 0]])],
+      audioLevelsOn: true, audioLevelIntervalMs: 100, destroyed: false, ...overrides,
+    });
+    return { engine, audioLevels };
+  }
+
+  it("reports the peak and RMS of the window at the playhead for the first two channels", () => {
+    vi.spyOn(performance, "now").mockReturnValue(1000);
+    const levels = harness().engine.getAudioLevels();
+
+    expect(levels.channels).toHaveLength(2);
+    expect(levels.channels[0].peak).toBeCloseTo(1, 6);
+    expect(levels.channels[0].peakDb).toBeCloseTo(0, 6);
+    expect(levels.channels[1].peak).toBeCloseTo(0.5, 6);
+    expect(levels.channels[1].peakDb).toBeCloseTo(-6.0206, 3);
+    expect(levels.time).toBe(0);
+    expect(levels.windowSeconds).toBeCloseTo(0.1, 6);
+  });
+
+  it("reports silence rather than the file's content when nothing is audible", () => {
+    vi.spyOn(performance, "now").mockReturnValue(1000);
+    expect(harness({ status: "paused", pausedAt: 0 }).engine.getAudioLevels().channels[0].peak).toBe(0);
+    // A decimated rate mutes audio, so its meter has to fall rather than hold the last reading.
+    expect(harness({ playbackRateValue: 4 }).engine.getAudioLevels().channels[0].peak).toBe(0);
+    expect(harness({ streamingAudioSupported: false }).engine.getAudioLevels().channels[0].peak).toBe(0);
+  });
+
+  it("does no measurement at all while disabled", () => {
+    vi.useFakeTimers();
+    vi.spyOn(performance, "now").mockReturnValue(1000);
+    const h = harness({ audioLevelsOn: false });
+
+    expect(h.engine.getAudioLevels()).toBeNull();
+    vi.advanceTimersByTime(500);
+    expect(h.audioLevels).not.toHaveBeenCalled();
+
+    h.engine.setAudioLevelsEnabled(true);
+    vi.advanceTimersByTime(250);
+    expect(h.audioLevels).toHaveBeenCalledTimes(2);
+    expect(h.engine.audioLevelsEnabled).toBe(true);
+
+    h.audioLevels.mockClear();
+    h.engine.setAudioLevelsEnabled(false);
+    vi.advanceTimersByTime(500);
+    expect(h.audioLevels).not.toHaveBeenCalled();
+    expect(h.engine.getAudioLevels()).toBeNull();
+  });
 });
