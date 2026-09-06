@@ -8,7 +8,7 @@ class FakeWorker {
   posted: any[] = [];
   terminated = false;
   constructor(public url: URL, public options?: unknown) { FakeWorker.instances.push(this); }
-  postMessage(message: any) { this.posted.push(message); }
+  postMessage(message: any, transfer: ArrayBuffer[] = []) { this.posted.push({ message, transfer }); }
   terminate() { this.terminated = true; }
   reply(id: number, ok: boolean, payload?: unknown, rest?: { name?: string; message?: string; stack?: string }) { this.onmessage?.({ data: { id, ok, payload, ...rest } }); }
   fail(message: string) { this.onerror?.({ message }); }
@@ -33,7 +33,7 @@ describe("createWorkerVideoDecoderClient", () => {
   it("resolves init once the worker replies for the matching id", async () => {
     const { client, worker } = setup();
     const promise = client.init("/libav");
-    expect(worker.posted[0]).toMatchObject({ type: "init", base: "/libav", id: 1 });
+    expect(worker.posted[0].message).toMatchObject({ type: "init", base: "/libav", id: 1 });
     worker.reply(1, true, undefined);
     await expect(promise).resolves.toBeUndefined();
   });
@@ -66,7 +66,7 @@ describe("createWorkerVideoDecoderClient", () => {
     const { client, worker } = setup();
     const first = client.decodeVideo([], 2, [], 25, "rgba");
     const second = client.decodeVideo([], 2, [], 25, "rgba");
-    expect(worker.posted.map(message => message.id)).toEqual([1, 2]);
+    expect(worker.posted.map(entry => entry.message.id)).toEqual([1, 2]);
     worker.reply(2, true, { frames: [], decodeMs: 2, convertMs: 0 });
     worker.reply(1, true, { frames: [], decodeMs: 1, convertMs: 0 });
     await expect(first).resolves.toMatchObject({ decodeMs: 1 });
@@ -82,6 +82,18 @@ describe("createWorkerVideoDecoderClient", () => {
     await expect(second).rejects.toThrow("worker crashed");
   });
 
+  it("transfers recycled buffers back to the worker rather than cloning them", async () => {
+    const { client, worker } = setup();
+    const recycle = [new ArrayBuffer(8), new ArrayBuffer(4)];
+    const promise = client.decodeStreamingVideo([], [], 30, false, 1, 1, 2, "yuv-webgl", 10, recycle);
+
+    expect(worker.posted[0].message).toMatchObject({ type: "decode-streaming", recycle });
+    expect(worker.posted[0].transfer).toBe(recycle);
+
+    worker.reply(1, true, { frames: [], decodeMs: 1, convertMs: 0, pooledFrames: 3 });
+    await expect(promise).resolves.toMatchObject({ pooledFrames: 3 });
+  });
+
   it("terminates the worker on dispose", () => {
     const { client, worker } = setup();
     client.dispose();
@@ -91,6 +103,6 @@ describe("createWorkerVideoDecoderClient", () => {
   it("posts an invalidate-streaming message without waiting for a reply", () => {
     const { client, worker } = setup();
     client.invalidateStreaming();
-    expect(worker.posted[0]).toMatchObject({ type: "invalidate-streaming" });
+    expect(worker.posted[0].message).toMatchObject({ type: "invalidate-streaming" });
   });
 });

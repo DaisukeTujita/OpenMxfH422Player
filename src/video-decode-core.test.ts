@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { decodeLegacy, decodeResultTransferables, decodeStreaming, handleWorkerRequest, initDecoder, invalidateStreaming, toDecodeResult, type DecodeWorkerState, type WireDecodeResult } from "./video-decode-core";
+import { decodeLegacy, decodeResultTransferables, decodeStreaming, FrameBufferPool, handleWorkerRequest, initDecoder, invalidateStreaming, toDecodeResult, type DecodeWorkerState, type WireDecodeResult } from "./video-decode-core";
 
 type DecoderMock = {
   AV_PIX_FMT_YUV422P?: number;
@@ -17,7 +17,7 @@ describe("decodeLegacy", () => {
       ff_free_decoder: vi.fn().mockResolvedValue(undefined),
     };
 
-    await decodeLegacy({ av: av as any }, { codecId: 2, chunks: [new Uint8Array([1])], mediaFrames: [0], frameRate: 25, videoRenderMode: "rgba" });
+    await decodeLegacy({ av: av as any, pool: new FrameBufferPool() }, { codecId: 2, chunks: [new Uint8Array([1])], mediaFrames: [0], frameRate: 25, videoRenderMode: "rgba" });
 
     expect(av.ff_free_decoder).toHaveBeenCalledOnce();
     expect(av.ff_free_decoder).toHaveBeenCalledWith(ctx, pkt, frame);
@@ -32,7 +32,7 @@ describe("decodeLegacy", () => {
       ff_free_decoder: vi.fn().mockResolvedValue(undefined),
     };
 
-    await expect(decodeLegacy({ av: av as any }, { codecId: 2, chunks: [], mediaFrames: [], frameRate: 25, videoRenderMode: "rgba" })).rejects.toBe(decodeError);
+    await expect(decodeLegacy({ av: av as any, pool: new FrameBufferPool() }, { codecId: 2, chunks: [], mediaFrames: [], frameRate: 25, videoRenderMode: "rgba" })).rejects.toBe(decodeError);
     expect(av.ff_free_decoder).toHaveBeenCalledOnce();
   });
 
@@ -45,7 +45,7 @@ describe("decodeLegacy", () => {
       ff_free_decoder: vi.fn().mockRejectedValue(cleanupError),
     };
 
-    await expect(decodeLegacy({ av: av as any }, { codecId: 2, chunks: [], mediaFrames: [], frameRate: 25, videoRenderMode: "rgba" })).rejects.toBe(decodeError);
+    await expect(decodeLegacy({ av: av as any, pool: new FrameBufferPool() }, { codecId: 2, chunks: [], mediaFrames: [], frameRate: 25, videoRenderMode: "rgba" })).rejects.toBe(decodeError);
     expect(av.ff_free_decoder).toHaveBeenCalledOnce();
   });
 
@@ -57,7 +57,7 @@ describe("decodeLegacy", () => {
       ff_free_decoder: vi.fn().mockRejectedValue(cleanupError),
     };
 
-    await expect(decodeLegacy({ av: av as any }, { codecId: 2, chunks: [], mediaFrames: [], frameRate: 25, videoRenderMode: "rgba" })).rejects.toBe(cleanupError);
+    await expect(decodeLegacy({ av: av as any, pool: new FrameBufferPool() }, { codecId: 2, chunks: [], mediaFrames: [], frameRate: 25, videoRenderMode: "rgba" })).rejects.toBe(cleanupError);
     expect(av.ff_free_decoder).toHaveBeenCalledOnce();
   });
 
@@ -74,7 +74,7 @@ describe("decodeLegacy", () => {
       ff_free_decoder: vi.fn().mockResolvedValue(undefined),
     };
 
-    const result = await decodeLegacy({ av: av as any }, { codecId: 2, chunks: [new Uint8Array([1]), new Uint8Array([2])], mediaFrames: [100, 101], frameRate: 25, videoRenderMode: "rgba" });
+    const result = await decodeLegacy({ av: av as any, pool: new FrameBufferPool() }, { codecId: 2, chunks: [new Uint8Array([1]), new Uint8Array([2])], mediaFrames: [100, 101], frameRate: 25, videoRenderMode: "rgba" });
 
     expect(result.frames.map(item => item.mediaFrame)).toEqual([100, 101]);
     expect(result.frames.map(item => item.time)).toEqual([4, 4.04]);
@@ -93,7 +93,7 @@ describe("decodeLegacy", () => {
       ff_free_decoder: vi.fn().mockResolvedValue(undefined),
     };
 
-    const result = await decodeLegacy({ av: av as any }, { codecId: 2, chunks: [new Uint8Array([1]), new Uint8Array([2]), new Uint8Array([3])], mediaFrames: [100, 101, 102], frameRate: 25, videoRenderMode: "rgba" });
+    const result = await decodeLegacy({ av: av as any, pool: new FrameBufferPool() }, { codecId: 2, chunks: [new Uint8Array([1]), new Uint8Array([2]), new Uint8Array([3])], mediaFrames: [100, 101, 102], frameRate: 25, videoRenderMode: "rgba" });
 
     expect(result.frames.map(item => item.mediaFrame)).toEqual([102, 100, 101]);
   });
@@ -104,7 +104,7 @@ describe("decodeStreaming decoder reuse", () => {
 
   it("reuses one decoder across adjacent chunks and flushes it only at the end", async () => {
     const av: DecoderMock = { AV_PIX_FMT_YUV422P: 4, ff_init_decoder: vi.fn().mockResolvedValue([11, 22, 33, 44]), ff_decode_multi: vi.fn().mockResolvedValue([]), ff_free_decoder: vi.fn().mockResolvedValue(undefined) };
-    const state: DecodeWorkerState = { av: av as any };
+    const state: DecodeWorkerState = { av: av as any, pool: new FrameBufferPool() };
     await decodeStreaming(state, { codecId: 2, chunks: [new Uint8Array([1])], mediaFrames: [0], frameRate: 30, flush: false, loadGeneration: 1, seekGeneration: 2, videoRenderMode: "yuv-webgl", maxMediaFrame: 300 });
     await decodeStreaming(state, { codecId: 2, chunks: [new Uint8Array([2])], mediaFrames: [1], frameRate: 30, flush: true, loadGeneration: 1, seekGeneration: 2, videoRenderMode: "yuv-webgl", maxMediaFrame: 300 });
     expect(av.ff_init_decoder).toHaveBeenCalledOnce();
@@ -115,7 +115,7 @@ describe("decodeStreaming decoder reuse", () => {
 
   it("reinitializes the decoder when the seek generation changes", async () => {
     const av: DecoderMock = { AV_PIX_FMT_YUV422P: 4, ff_init_decoder: vi.fn().mockResolvedValue([11, 22, 33, 44]), ff_decode_multi: vi.fn().mockResolvedValue([]), ff_free_decoder: vi.fn().mockResolvedValue(undefined) };
-    const state: DecodeWorkerState = { av: av as any };
+    const state: DecodeWorkerState = { av: av as any, pool: new FrameBufferPool() };
     await decodeStreaming(state, { codecId: 2, chunks: [new Uint8Array([1])], mediaFrames: [0], frameRate: 30, flush: false, loadGeneration: 1, seekGeneration: 2, videoRenderMode: "yuv-webgl", maxMediaFrame: 300 });
     await decodeStreaming(state, { codecId: 2, chunks: [new Uint8Array([2])], mediaFrames: [1], frameRate: 30, flush: false, loadGeneration: 1, seekGeneration: 3, videoRenderMode: "yuv-webgl", maxMediaFrame: 300 });
     expect(av.ff_init_decoder).toHaveBeenCalledTimes(2);
@@ -131,7 +131,7 @@ describe("decodeStreaming decoder reuse", () => {
       // A real ff_free_decoder settles on a later microtask; resolving synchronously would hide an unawaited free.
       ff_free_decoder: vi.fn(async () => { await Promise.resolve(); order.push("free"); }),
     };
-    const state: DecodeWorkerState = { av: av as any };
+    const state: DecodeWorkerState = { av: av as any, pool: new FrameBufferPool() };
     const request = { codecId: 2, chunks: [new Uint8Array([1])], mediaFrames: [0], frameRate: 30, flush: false, videoRenderMode: "yuv-webgl", maxMediaFrame: 300 } as const;
 
     await decodeStreaming(state, { ...request, loadGeneration: 1, seekGeneration: 2 });
@@ -143,7 +143,7 @@ describe("decodeStreaming decoder reuse", () => {
   it("awaits the decoder free when invalidating", async () => {
     let freed = false;
     const av: DecoderMock = { AV_PIX_FMT_YUV422P: 4, ff_init_decoder: vi.fn().mockResolvedValue([11, 22, 33, 44]), ff_decode_multi: vi.fn().mockResolvedValue([]), ff_free_decoder: vi.fn(async () => { await Promise.resolve(); freed = true; }) };
-    const state: DecodeWorkerState = { av: av as any };
+    const state: DecodeWorkerState = { av: av as any, pool: new FrameBufferPool() };
     await decodeStreaming(state, { codecId: 2, chunks: [new Uint8Array([1])], mediaFrames: [0], frameRate: 30, flush: false, loadGeneration: 1, seekGeneration: 2, videoRenderMode: "yuv-webgl", maxMediaFrame: 300 });
 
     await invalidateStreaming(state);
@@ -155,7 +155,7 @@ describe("decodeStreaming decoder reuse", () => {
   it("keeps decoded YUV planes for direct WebGL rendering", async () => {
     const decoded = { pts: 0, width: 2, height: 1, format: 4, data: new Uint8Array([16, 16, 128, 128]), layout: [{ offset: 0, stride: 2 }, { offset: 2, stride: 1 }, { offset: 3, stride: 1 }] };
     const av: DecoderMock = { AV_PIX_FMT_YUV422P: 4, ff_init_decoder: vi.fn().mockResolvedValue([11, 22, 33, 44]), ff_decode_multi: vi.fn().mockResolvedValue([decoded]), ff_free_decoder: vi.fn().mockResolvedValue(undefined) };
-    const state: DecodeWorkerState = { av: av as any };
+    const state: DecodeWorkerState = { av: av as any, pool: new FrameBufferPool() };
     const result = await decodeStreaming(state, { codecId: 2, chunks: [new Uint8Array([1])], mediaFrames: [0], frameRate: 30, flush: true, loadGeneration: 1, seekGeneration: 2, videoRenderMode: "yuv-webgl", maxMediaFrame: 1 });
     expect(result.frames[0].frame).toMatchObject({ width: 2, height: 1, y: new Uint8Array([16, 16]), u: new Uint8Array([128]), v: new Uint8Array([128]) });
     expect(result.convertMs).toBe(0);
@@ -165,7 +165,7 @@ describe("decodeStreaming decoder reuse", () => {
   it("ignores a decoded PTS outside the media's valid frame range", async () => {
     const decoded = { pts: 999_999, width: 2, height: 1, format: 4, data: new Uint8Array([16, 16, 128, 128]), layout: [{ offset: 0, stride: 2 }, { offset: 2, stride: 1 }, { offset: 3, stride: 1 }] };
     const av: DecoderMock = { AV_PIX_FMT_YUV422P: 4, ff_init_decoder: vi.fn().mockResolvedValue([11, 22, 33, 44]), ff_decode_multi: vi.fn().mockResolvedValue([decoded]), ff_free_decoder: vi.fn().mockResolvedValue(undefined) };
-    const state: DecodeWorkerState = { av: av as any };
+    const state: DecodeWorkerState = { av: av as any, pool: new FrameBufferPool() };
     const result = await decodeStreaming(state, { codecId: 2, chunks: [new Uint8Array([1])], mediaFrames: [42], frameRate: 30, flush: true, loadGeneration: 1, seekGeneration: 2, videoRenderMode: "yuv-webgl", maxMediaFrame: 300 });
     expect(result.frames[0].mediaFrame).toBe(42);
   });
@@ -174,7 +174,7 @@ describe("decodeStreaming decoder reuse", () => {
 describe("handleWorkerRequest", () => {
   it("dispatches decode-legacy, decode-streaming, invalidate-streaming, and dispose", async () => {
     const av: DecoderMock = { AV_PIX_FMT_YUV422P: 4, ff_init_decoder: vi.fn().mockResolvedValue([11, 22, 33, 44]), ff_decode_multi: vi.fn().mockResolvedValue([]), ff_free_decoder: vi.fn().mockResolvedValue(undefined) };
-    const state: DecodeWorkerState = { av: av as any };
+    const state: DecodeWorkerState = { av: av as any, pool: new FrameBufferPool() };
 
     const legacyResult = await handleWorkerRequest(state, { id: 1, type: "decode-legacy", codecId: 2, chunks: [], mediaFrames: [], frameRate: 25, videoRenderMode: "rgba" });
     expect(legacyResult).toMatchObject({ frames: [] });
@@ -191,7 +191,7 @@ describe("handleWorkerRequest", () => {
 
   it("surfaces an init failure from a bad libav base", async () => {
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("network unavailable")));
-    const state: DecodeWorkerState = {};
+    const state: DecodeWorkerState = { pool: new FrameBufferPool() };
     await expect(handleWorkerRequest(state, { id: 1, type: "init", base: "/libav" })).rejects.toThrow("Failed to fetch custom libav.js frontend");
     vi.unstubAllGlobals();
   });
@@ -203,7 +203,7 @@ describe("worker boundary handoff", () => {
   const decoded = { pts: 0, width: 2, height: 1, format: 4, data: new Uint8Array([16, 235, 128, 128]), layout: [{ offset: 0, stride: 2 }, { offset: 2, stride: 1 }, { offset: 3, stride: 1 }] };
   const decoderMock = (): DecoderMock => ({ AV_PIX_FMT_YUV422P: 4, ff_init_decoder: vi.fn().mockResolvedValue([11, 22, 33, 44]), ff_decode_multi: vi.fn().mockResolvedValue([decoded]), ff_free_decoder: vi.fn().mockResolvedValue(undefined) });
   const decode = (videoRenderMode: "rgba" | "yuv-webgl") =>
-    decodeLegacy({ av: decoderMock() as any }, { codecId: 2, chunks: [new Uint8Array([1])], mediaFrames: [0], frameRate: 25, videoRenderMode });
+    decodeLegacy({ av: decoderMock() as any, pool: new FrameBufferPool() }, { codecId: 2, chunks: [new Uint8Array([1])], mediaFrames: [0], frameRate: 25, videoRenderMode });
 
   it.each(["rgba", "yuv-webgl"] as const)("survives a real structured clone with transfer in %s mode", async videoRenderMode => {
     const result = await decode(videoRenderMode);
@@ -244,6 +244,89 @@ describe("worker boundary handoff", () => {
   });
 });
 
+describe("FrameBufferPool", () => {
+  it("hands back a recycled buffer instead of allocating a new one", () => {
+    const pool = new FrameBufferPool();
+    pool.setChunkShape(2, 100);
+    const original = new ArrayBuffer(100);
+    pool.recycle([original]);
+
+    expect(pool.take(100)).toBe(original);
+    // Taking it out empties the pool, so the next request has to allocate.
+    expect(pool.take(100)).not.toBe(original);
+  });
+
+  it("refuses buffers past the chunk budget and drops the excess when the budget shrinks", () => {
+    const pool = new FrameBufferPool();
+    pool.setChunkShape(2, 100);
+    pool.recycle([new ArrayBuffer(100), new ArrayBuffer(100), new ArrayBuffer(100)]);
+    expect(pool.pooledFrames).toBe(2);
+
+    pool.setChunkShape(1, 100);
+
+    expect(pool.pooledFrames).toBe(1);
+  });
+
+  it("ignores a buffer that was already transferred away", () => {
+    const pool = new FrameBufferPool();
+    pool.setChunkShape(4, 8);
+    const detached = new ArrayBuffer(8);
+    structuredClone(detached, { transfer: [detached] });
+
+    pool.recycle([detached]);
+
+    expect(pool.pooledFrames).toBe(0);
+  });
+
+  it("reports nothing pooled before a chunk has established the frame size", () => {
+    const pool = new FrameBufferPool();
+    pool.recycle([new ArrayBuffer(100)]);
+    expect(pool.pooledFrames).toBe(0);
+  });
+});
+
+describe("decodeStreaming buffer reuse", () => {
+  const decoded = { pts: 0, width: 2, height: 2, format: 4, data: new Uint8Array(8), layout: [{ offset: 0, stride: 2 }, { offset: 4, stride: 1 }, { offset: 6, stride: 1 }] };
+  const request = { codecId: 2, chunks: [new Uint8Array([1])], mediaFrames: [0], frameRate: 30, flush: false, loadGeneration: 1, seekGeneration: 2, videoRenderMode: "yuv-webgl", maxMediaFrame: 300 } as const;
+
+  it("decodes the next chunk into the planes the engine returned", async () => {
+    const av: DecoderMock = { AV_PIX_FMT_YUV422P: 4, ff_init_decoder: vi.fn().mockResolvedValue([11, 22, 33, 44]), ff_decode_multi: vi.fn().mockResolvedValue([decoded]), ff_free_decoder: vi.fn().mockResolvedValue(undefined) };
+    const state: DecodeWorkerState = { av: av as any, pool: new FrameBufferPool() };
+
+    const first = await decodeStreaming(state, request);
+    const firstFrame = first.frames[0].frame;
+    if (firstFrame.kind !== "yuv422p") throw new Error("expected planar frame");
+    const returned = [firstFrame.y.buffer, firstFrame.u.buffer, firstFrame.v.buffer] as ArrayBuffer[];
+
+    const second = await decodeStreaming(state, { ...request, recycle: returned });
+    const secondFrame = second.frames[0].frame;
+    if (secondFrame.kind !== "yuv422p") throw new Error("expected planar frame");
+
+    expect(secondFrame.y.buffer).toBe(returned[0]);
+    expect([secondFrame.u.buffer, secondFrame.v.buffer]).toEqual(expect.arrayContaining([returned[1], returned[2]]));
+    // Reported before the chunk drains the pool, so it shows what was available to reuse.
+    expect(second.pooledFrames).toBe(1);
+    expect(first.pooledFrames).toBe(0);
+  });
+
+  it("reuses the RGBA output buffer and returns the scratch planes to the pool", async () => {
+    vi.stubGlobal("ImageData", class { constructor(public data: Uint8ClampedArray, public width: number, public height: number) {} });
+    const av: DecoderMock = { AV_PIX_FMT_YUV422P: 4, ff_init_decoder: vi.fn().mockResolvedValue([11, 22, 33, 44]), ff_decode_multi: vi.fn().mockResolvedValue([decoded]), ff_free_decoder: vi.fn().mockResolvedValue(undefined) };
+    const state: DecodeWorkerState = { av: av as any, pool: new FrameBufferPool() };
+
+    const first = await decodeStreaming(state, { ...request, videoRenderMode: "rgba" });
+    const firstFrame = first.frames[0].frame;
+    if (firstFrame.kind !== "rgba") throw new Error("expected rgba frame");
+
+    const second = await decodeStreaming(state, { ...request, videoRenderMode: "rgba", recycle: [firstFrame.data.buffer] });
+    const secondFrame = second.frames[0].frame;
+    if (secondFrame.kind !== "rgba") throw new Error("expected rgba frame");
+
+    expect(secondFrame.data.buffer).toBe(firstFrame.data.buffer);
+    vi.unstubAllGlobals();
+  });
+});
+
 describe("initDecoder", () => {
   it("rejects a libav build without swscale support", async () => {
     vi.stubGlobal("self", { location: { href: "https://player.example/index.html" } });
@@ -251,7 +334,7 @@ describe("initDecoder", () => {
     const moduleUrl = `data:text/javascript,${encodeURIComponent("export async function LibAV() { return { libavjs_with_swscale: async () => 0 }; }")}`;
     vi.spyOn(URL, "createObjectURL").mockReturnValue(moduleUrl);
     vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => undefined);
-    const state: DecodeWorkerState = {};
+    const state: DecodeWorkerState = { pool: new FrameBufferPool() };
     await expect(initDecoder(state, "/libav")).rejects.toThrow("Custom libav.js was built without swscale");
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
