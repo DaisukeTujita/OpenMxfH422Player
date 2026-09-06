@@ -1,10 +1,11 @@
 export { H422Player } from "./H422Player";
+export { DEFAULT_VIDEO_QUEUE_MAX_BYTES, DEFAULT_FULL_DECODE_MAX_RATE } from "./engine";
 export { parseMxf, readBer } from "./mxf";
 export { parseMxfMetadata } from "./mxf-metadata";
 export { parseMxfMetadataFromReader } from "./mxf-reader";
 export { FileRandomAccessReader, DEFAULT_READER_CACHE_BYTES, DEFAULT_READER_CHUNK_SIZE, DEFAULT_READER_MAX_READ_SIZE } from "./random-access-reader";
 export { readKlvHeader, readKlvValue } from "./klv-reader";
-export { findSeekPoint } from "./mxf-index";
+export { findSeekPoint, mergeIndexTables } from "./mxf-index";
 export { indexMxfEssence, readEssenceRange, essenceDecodeStart, DEFAULT_ESSENCE_PREROLL_FRAMES, DEFAULT_ESSENCE_READ_SIZE } from "./essence-reader";
 export { formatTimecodeFrame, parseTimecodeFrame, framesPerTimecodeDay, mediaFrameToTimecode, mediaSecondsToTimecode, timecodeToMediaFrame, timecodeToMediaSeconds, resolveTimecodePosition, timecodeAtFrame, timecodeAtSeconds } from "./timecode";
 export type { MxfMediaInfo, MxfMetadataResult } from "./mxf-metadata";

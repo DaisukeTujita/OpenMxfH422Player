@@ -45,9 +45,11 @@ export function App() {
   const [timecodeInput, setTimecodeInput] = useState("");
   const [timecodeError, setTimecodeError] = useState("");
   const [seeking, setSeeking] = useState(false);
+  const [rate, setRate] = useState(1);
+
   const [buffering, setBuffering] = useState(false);
   const [mode,setMode]=useState<PlaybackMode>("streaming");
-  const [videoRenderMode,setVideoRenderMode]=useState<VideoRenderMode>("rgba");
+  const [videoRenderMode,setVideoRenderMode]=useState<VideoRenderMode>("yuv-webgl");
   const [diagnostics,setDiagnostics]=useState<PlayerDiagnostics>();
   const selectedStartTimecode = mediaInfo?.selectedTimecode
     ? formatTimecodeFrame(mediaInfo.selectedTimecode.startFrame, mediaInfo.selectedTimecode.roundedTimecodeBase, mediaInfo.selectedTimecode.dropFrame)
@@ -94,6 +96,9 @@ export function App() {
       setTimecodeError(message==="out-of-range"?"指定したタイムコードは素材範囲外です。":message==="timecode-track-unavailable"?"Timecode Trackがないためタイムコード指定ジャンプは利用できません。":"入力形式が正しくありません。HH:MM:SS:FF（DFはHH:MM:SS;FF）で入力してください。");
     }
   };
+
+  // The library reports seeking and buffering as state; deciding what to disable is the host's job.
+  const transportBusy = !info || seeking || buffering || status === "loading" || status === "error";
 
   return (
     <main>
@@ -165,6 +170,20 @@ export function App() {
           <button type="button" disabled={status !== "playing"} onClick={() => playerRef.current?.pause()}>一時停止</button>
           <button type="button" disabled={!info} onClick={() => void stop()}>停止</button>
         </div>
+        <div className="button-row">
+          {[-4, -2, -1.5, 1, 1.5, 2, 4].map(value => (
+            <button key={value} type="button" disabled={transportBusy} aria-pressed={rate === value}
+              onClick={() => { setRate(value); void playerRef.current?.setPlaybackRate(value); }}>
+              {value > 0 ? `${value}x` : `${Math.abs(value)}x 逆`}
+            </button>
+          ))}
+        </div>
+        <div className="button-row">
+          <button type="button" disabled={transportBusy} onClick={() => void playerRef.current?.seekRelative(-5)}>5秒戻る</button>
+          <button type="button" disabled={transportBusy} onClick={() => void playerRef.current?.stepFrame(-1)}>コマ戻し</button>
+          <button type="button" disabled={transportBusy} onClick={() => void playerRef.current?.stepFrame(1)}>コマ送り</button>
+          <button type="button" disabled={transportBusy} onClick={() => void playerRef.current?.seekRelative(5)}>5秒進む</button>
+        </div>
         <div className="seek-row">
           <span>{formatTime(currentTime)}</span>
           <input
@@ -200,7 +219,7 @@ export function App() {
             <dt>Index Table</dt><dd>{mediaInfo ? `${mediaInfo.indexTableCount > 0 ? "あり" : "なし"}（${mediaInfo.indexTableCount} table / ${mediaInfo.indexEntryCount} entries）` : "未取得"}</dd>
           </dl>
         </div>
-        <div className="panel streaming-diagnostics"><h2>Streaming診断</h2><p>方式: {mode} / 描画: {diagnostics?.videoRenderMode??videoRenderMode}</p><p>実行: {diagnostics?.decoderExecution??"-"} / 適応バッファ: {diagnostics?.adaptiveVideoAheadSeconds?.toFixed(1)??"-"}s / 補充開始: 残り{diagnostics?.adaptiveRefillThresholdSeconds?.toFixed(1)??"-"}s / 再利用プール: {diagnostics?.pooledVideoFrames??0} frames</p><p>映像性能: decode {diagnostics?.videoDecodeMs.toFixed(1)??"-"} ms / RGBA変換 {diagnostics?.videoColorConvertMs.toFixed(1)??"-"} ms / GPU転送・描画 {diagnostics?.videoUploadMs.toFixed(1)??"-"} ms / {diagnostics?.videoDecodedFrames??0} frames</p><p>TC Track: {diagnostics?.selectedTimecodeTrack??"なし"} / {diagnostics?.timecodeSelectionReason??"-"}</p><p>seek: requested {diagnostics?.requestedTimecode??diagnostics?.requestedFrame??"-"} / actual {diagnostics?.actualDisplayedFrame??"-"} / start {diagnostics?.seekStartFrame??"-"} / preroll {diagnostics?.prerollFrames??0} / {diagnostics?.seekSource??"-"}</p><p>seek I/O: {diagnostics?.seekReadBytes??0} bytes / {diagnostics?.seekElapsedMs?.toFixed(1)??"-"} ms</p><p>ファイル: {diagnostics?.fileSize??0} bytes</p><p>Reader: {diagnostics?.bytesLoaded??0} bytes / {diagnostics?.underlyingReadCount??0} reads</p><p>キャッシュ: {diagnostics?.cacheBytes??0} bytes</p><p>映像キュー: {diagnostics?.videoQueueFrames??0} frames ({diagnostics?.videoQueueStart?.toFixed(2)??"-"}–{diagnostics?.videoQueueEnd?.toFixed(2)??"-"}s)</p><p>音声状態: {mode!=="streaming"?"legacy":buffering?"buffering中":diagnostics?.streamingAudioSupported?(status==="playing"?"対応・再生中":"対応"):mediaInfo?.audio?"未対応形式のため映像のみ":"音声なし"}</p><p>音声形式: {diagnostics?.audioSampleRate??"-"} Hz / {diagnostics?.audioChannels??"-"} ch / track {diagnostics?.selectedAudioTrackNumber??"-"}</p><p>音声キュー: {diagnostics?.audioQueueStart?.toFixed(2)??"-"}–{diagnostics?.audioQueueEnd?.toFixed(2)??"-"}s / {diagnostics?.scheduledAudioRanges??0} nodes / {diagnostics?.audioBytesLoaded??0} bytes / {diagnostics?.audioExhausted?"終端":"補充中"}</p><p>形式判定: {diagnostics?.audioFormatBasis??"-"}</p><p>A/V drift: {diagnostics?.audioVideoDriftMs?.toFixed(1)??"-"} ms</p><p>世代: load {diagnostics?.loadGeneration??0} / seek {diagnostics?.seekGeneration??0}</p></div>
+        <div className="panel streaming-diagnostics"><h2>Streaming診断</h2><p>方式: {mode} / 描画: {diagnostics?.videoRenderMode??videoRenderMode} / 描画実装: {diagnostics?.rendererBackend??"-"}</p><p>速度: {diagnostics?.playbackRate??rate}x / フレーム選択: {diagnostics?.frameSelection??"-"} / 音声速度: {diagnostics?.audioPlaybackRate===0?"ミュート":`${diagnostics?.audioPlaybackRate??1}x`}</p><p>実行: {diagnostics?.decoderExecution??"-"} / 適応バッファ: {diagnostics?.adaptiveVideoAheadSeconds?.toFixed(1)??"-"}s / 補充開始: 残り{diagnostics?.adaptiveRefillThresholdSeconds?.toFixed(1)??"-"}s / 再利用プール: {diagnostics?.pooledVideoFrames??0} frames</p><p>映像性能: decode {diagnostics?.videoDecodeMs.toFixed(1)??"-"} ms / RGBA変換 {diagnostics?.videoColorConvertMs.toFixed(1)??"-"} ms / GPU転送・描画 {diagnostics?.videoUploadMs.toFixed(1)??"-"} ms / {diagnostics?.videoDecodedFrames??0} frames</p><p>TC Track: {diagnostics?.selectedTimecodeTrack??"なし"} / {diagnostics?.timecodeSelectionReason??"-"}</p><p>seek: requested {diagnostics?.requestedTimecode??diagnostics?.requestedFrame??"-"} / actual {diagnostics?.actualDisplayedFrame??"-"} / start {diagnostics?.seekStartFrame??"-"} / preroll {diagnostics?.prerollFrames??0} / {diagnostics?.seekSource??"-"}</p><p>seek I/O: {diagnostics?.seekReadBytes??0} bytes / {diagnostics?.seekElapsedMs?.toFixed(1)??"-"} ms</p><p>ファイル: {diagnostics?.fileSize??0} bytes</p><p>Reader: {diagnostics?.bytesLoaded??0} bytes / {diagnostics?.underlyingReadCount??0} reads</p><p>キャッシュ: {diagnostics?.cacheBytes??0} bytes</p><p>映像キュー: {diagnostics?.videoQueueFrames??0} frames ({diagnostics?.videoQueueStart?.toFixed(2)??"-"}–{diagnostics?.videoQueueEnd?.toFixed(2)??"-"}s)</p><p>音声状態: {mode!=="streaming"?"legacy":buffering?"buffering中":diagnostics?.streamingAudioSupported?(status==="playing"?"対応・再生中":"対応"):mediaInfo?.audio?"未対応形式のため映像のみ":"音声なし"}</p><p>音声形式: {diagnostics?.audioSampleRate??"-"} Hz / {diagnostics?.audioChannels??"-"} ch / track {diagnostics?.selectedAudioTrackNumber??"-"}</p><p>音声キュー: {diagnostics?.audioQueueStart?.toFixed(2)??"-"}–{diagnostics?.audioQueueEnd?.toFixed(2)??"-"}s / {diagnostics?.scheduledAudioRanges??0} nodes / {diagnostics?.audioBytesLoaded??0} bytes / {diagnostics?.audioExhausted?"終端":"補充中"}</p><p>形式判定: {diagnostics?.audioFormatBasis??"-"}</p><p>A/V drift: {diagnostics?.audioVideoDriftMs?.toFixed(1)??"-"} ms</p><p>世代: load {diagnostics?.loadGeneration??0} / seek {diagnostics?.seekGeneration??0}</p></div>
       </section>
     </main>
   );

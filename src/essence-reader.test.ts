@@ -23,6 +23,32 @@ describe("reader-based essence index",()=>{
   it("indexes a huge sparse MXF without reading essence values",async()=>{const {reader}=virtualPackets(3,10n*1024n*1024n*1024n);const index=await indexMxfEssence(reader);expect(index.packets).toHaveLength(3);expect(index.packets[1]).toMatchObject({kind:"video",editUnit:1,trackNumber:1});expect(reader.requests.every(request=>request.length<=17&&index.packets.every(packet=>request.offset!==packet.valueOffset))).toBe(true);expect(reader.requests.reduce((sum,r)=>sum+BigInt(r.length),0n)*1_000_000n).toBeLessThan(reader.size);});
   it("documents that aligned Blob chunks can physically load most of a densely-spaced file",async()=>{const valueLength=300*1024,parts:Uint8Array[]=[];for(let index=0;index<8;index++)parts.push(header(essenceKey(0x15),BigInt(valueLength)),new Uint8Array(valueLength));const blob=new TrackingBlob(parts),reader=new FileRandomAccessReader(blob);await indexMxfEssence(reader);const stats=reader.getStats();expect(stats.bytesLoaded).toBeGreaterThan(BigInt(blob.size)*9n/10n);expect(stats.underlyingReadCount).toBe(blob.slices.length);expect(stats.largestUnderlyingRead).toBeLessThanOrEqual(1024*1024);});
   it("associates entries by stream identifiers and leaves ambiguous tables undefined",async()=>{const source=virtualPackets(2,4n),secondOffset=BigInt(source.regions[2].offset);const identified=await indexMxfEssence(source.reader,{partitions:[{offset:0n,kind:"body",bodySid:1,indexSid:1},{offset:secondOffset,kind:"body",bodySid:2,indexSid:2}],indexTables:[table(1,-1),table(2,-2,1)]});expect(identified.packets.map(packet=>packet.editUnit)).toEqual([0,1]);expect(identified.packets.map(packet=>packet.keyFrameOffset)).toEqual([-1,-2]);const ambiguous=await indexMxfEssence(virtualPackets(1,4n).reader,{indexTables:[table(undefined,-1),table(undefined,-2)]});expect(ambiguous.packets[0].keyFrameOffset).toBeUndefined();});
+  it("merges index segments that describe one essence, so entries past the first segment survive",async()=>{
+    const source=virtualPackets(4,4n);
+    // Two segments of one index: edit units 0-1 and 2-3, both naming BodySID 1.
+    const first={editRateNumerator:30000,editRateDenominator:1001,startPosition:0,duration:2,bodySid:1,entries:[{editUnit:0,streamOffset:0n,keyFrameOffset:0},{editUnit:1,streamOffset:4n,keyFrameOffset:-1}]};
+    const second={editRateNumerator:30000,editRateDenominator:1001,startPosition:2,duration:2,bodySid:1,entries:[{editUnit:2,streamOffset:8n,keyFrameOffset:0},{editUnit:3,streamOffset:12n,keyFrameOffset:-1}]};
+    const index=await indexMxfEssence(source.reader,{partitions:[{offset:0n,kind:"body",bodySid:1,indexSid:1}],indexTables:[second,first]});
+    expect(index.packets.map(packet=>packet.keyFrameOffset)).toEqual([0,-1,0,-1]);
+  });
+
+  it("merges segments of one index stream even when a footer segment carries a different BodySID",async()=>{
+    const source=virtualPackets(4,4n);
+    // What ffmpeg writes: the body segment names BodySID 1, the footer segment names 0, both IndexSID 2.
+    const body={editRateNumerator:30000,editRateDenominator:1001,startPosition:0,duration:2,bodySid:1,indexSid:2,entries:[{editUnit:0,streamOffset:0n,keyFrameOffset:0},{editUnit:1,streamOffset:4n,keyFrameOffset:-1}]};
+    const footer={editRateNumerator:30000,editRateDenominator:1001,startPosition:2,duration:2,bodySid:0,indexSid:2,entries:[{editUnit:2,streamOffset:8n,keyFrameOffset:0},{editUnit:3,streamOffset:12n,keyFrameOffset:-1}]};
+    const index=await indexMxfEssence(source.reader,{partitions:[{offset:0n,kind:"body",bodySid:1,indexSid:0}],indexTables:[body,footer]});
+    expect(index.packets.map(packet=>packet.keyFrameOffset)).toEqual([0,-1,0,-1]);
+  });
+
+  it("drops a group whose segments contradict each other rather than picking one",async()=>{
+    const source=virtualPackets(1,4n);
+    const a={editRateNumerator:30000,editRateDenominator:1001,startPosition:0,duration:1,bodySid:1,entries:[{editUnit:0,streamOffset:0n,keyFrameOffset:0}]};
+    const b={editRateNumerator:30000,editRateDenominator:1001,startPosition:0,duration:1,bodySid:1,entries:[{editUnit:0,streamOffset:99n,keyFrameOffset:-5}]};
+    const index=await indexMxfEssence(source.reader,{partitions:[{offset:0n,kind:"body",bodySid:1,indexSid:1}],indexTables:[a,b]});
+    expect(index.packets[0].keyFrameOffset).toBeUndefined();
+  });
+
   it("reads only the selected range and respects a read-size limit",async()=>{const {reader}=virtualPackets(8,4n);const index=await indexMxfEssence(reader);reader.requests=[];const packets=await readEssenceRange(reader,index,{startFrame:5,endFrame:6,prerollFrames:1,maxReadSize:2});expect(packets.map(packet=>packet.editUnit)).toEqual([4,5,6]);expect(reader.requests).toHaveLength(6);expect(Math.max(...reader.requests.map(request=>request.length))).toBe(2);expect(reader.requests.every(request=>packets.some(packet=>request.offset>=packet.valueOffset&&request.offset<packet.valueOffset+packet.valueLength))).toBe(true);});
   it("uses index key-frame offsets and otherwise falls back to bounded preroll",()=>{const index={frameRate:30,partitions:[],packets:Array.from({length:100},(_,editUnit)=>({offset:0n,valueOffset:0n,valueLength:0n,trackNumber:1,kind:"video" as const,editUnit,presentationTime:editUnit/30,...(editUnit===70?{keyFrameOffset:-10}: {})}))} satisfies EssenceIndex;expect(essenceDecodeStart(index,70)).toBe(60);expect(essenceDecodeStart({...index,packets:index.packets.map(packet=>({...packet,keyFrameOffset:undefined}))},70)).toBe(70-DEFAULT_ESSENCE_PREROLL_FRAMES);});
   it("aborts indexing and range reads",async()=>{const {reader}=virtualPackets(2,4n),controller=new AbortController();controller.abort();await expect(indexMxfEssence(reader,{signal:controller.signal})).rejects.toMatchObject({name:"AbortError"});const index=await indexMxfEssence(reader);await expect(readEssenceRange(reader,index,{startFrame:0,endFrame:1,signal:controller.signal})).rejects.toMatchObject({name:"AbortError"});});
