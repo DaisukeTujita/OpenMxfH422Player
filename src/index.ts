@@ -1,4 +1,5 @@
 export { H422Player } from "./H422Player";
+export { DEFAULT_VIDEO_QUEUE_MAX_BYTES } from "./engine";
 export { parseMxf, readBer } from "./mxf";
 export { parseMxfMetadata } from "./mxf-metadata";
 export { parseMxfMetadataFromReader } from "./mxf-reader";
