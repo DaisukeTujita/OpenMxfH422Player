@@ -25,6 +25,27 @@ export interface SeekPoint {
   source: "index" | "sequential-fallback";
 }
 
+/**
+ * Index Table Segments are per-partition slices of one index, and their entries already carry
+ * absolute edit units, so seeking has to see all of them. Taking only the first segment made every
+ * seek past it fall back to a sequential scan. Segments naming a different BodySID belong to another
+ * essence and are left out.
+ */
+export function mergeIndexTables(tables: MxfIndexTable[]): MxfIndexTable | undefined {
+  if (tables.length <= 1) return tables[0];
+  const ordered = [...tables].sort((a, b) => a.startPosition - b.startPosition), first = ordered[0];
+  // IndexSID first: it names the index stream, and a footer-partition segment of that same stream
+  // carries a different BodySID.
+  // SID 0 is MXF's "none", so it never identifies a stream.
+  const sid = (value: number | undefined) => value === undefined || value === 0 ? undefined : value;
+  const sameEssence = sid(first.indexSid) !== undefined
+    ? ordered.filter(table => sid(table.indexSid) === undefined || table.indexSid === first.indexSid)
+    : ordered.filter(table => sid(table.bodySid) === undefined || sid(first.bodySid) === undefined || table.bodySid === first.bodySid);
+  const seen = new Set<number>(), entries: MxfIndexEntry[] = [];
+  for (const table of sameEssence) for (const entry of table.entries) if (!seen.has(entry.editUnit)) { seen.add(entry.editUnit); entries.push(entry); }
+  return { ...first, duration: sameEssence.reduce((total, table) => total + table.duration, 0), entries };
+}
+
 /** Select the last random-access entry at or before the requested edit unit. */
 export function findSeekPoint(index: MxfIndexTable | undefined, targetEditUnit: number): SeekPoint {
   const target = Math.max(0, Math.trunc(targetEditUnit));
