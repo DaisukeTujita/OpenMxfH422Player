@@ -62,6 +62,8 @@ export default function Preview({ file }: { file: File }) {
 }
 ```
 
+`videoRenderMode` の既定値は `yuv-webgl` で、yuv422p平面をそのままGPUへ転送しシェーダーで変換します。CPU変換が必要な場合は `rgba` を指定してください。**WebGLコンテキストが取得できない環境では2D canvasへ自動フォールバックし、`rgba` を強制します**（平面YUVを2D canvasで変換する手段がないため）。フォールバックしたかどうかは診断値 `rendererBackend`（`"webgl"` または `"canvas2d"`）で判別できます。
+
 `mode` は `"legacy" | "streaming"` で、既定値は安全な `legacy` です。streaming では
 `readWhole()` を呼ばず、1回約3秒（`chunkSeconds`）の区間を取得してデコードします。先読み目標は
 既定6秒で、実測したデコード時間に応じて最大9秒まで自動的に伸び、さらに後述のバイト上限で
@@ -116,7 +118,11 @@ streaming音声はDescriptorが **48 kHz / 24-bit / 2 ch** でSound Essence pack
 `PlayerInfo.audioChannels` は「現在再生可能な音声チャンネル数」です。このため映像のみのstreamingでは
 音声なし、muted、または未対応Descriptorでは `0` を返し、音声Essence Valueを読み込みません。診断には対応状態、選択trackNumber、形式、音声キュー範囲、予約Node数、読込byte数、A/V driftを含みます。
 
-`src`には`File`、`Blob`、またはCORSを許可したURLを指定できます。`ref`から`play()`、`pause()`、`seek(seconds)`、`currentTime`、`duration`を利用できます。音声はブラウザのautoplay policyにより通常ユーザー操作後に開始します。シーク時はAudioBufferSourceNodeを指定位置から作り直します。
+`src`には`File`、`Blob`、またはCORSを許可したURLを指定できます。`ref`から`play()`、`pause()`、`seek(seconds)`、`stepFrame(frames)`、`seekRelative(seconds)`、`seekTimecode(timecode)`、`currentTime`、`duration`、`getDiagnostics()`を利用できます。
+
+`stepFrame(frames)` はコマ送り／コマ戻しです（負値で後方）。再生中に呼ぶと**先に一時停止します**。そうしないと再生時計が進んで、seekが着地する前に目的フレームを通り過ぎるためです。`seekRelative(seconds)` は相対スキップで、素材範囲へクランプされ、再生中ならそのまま再生を続けます。どちらも既存の世代管理付きseekを経由するため、`onSeekingChange` が通常どおり通知されます。
+
+シーク中・バッファリング中の状態は `onSeekingChange` / `onBufferingChange`、および `PlayerStatus` の `buffering` として公開します。**どのUIを非活性にするかはホストアプリの責務**であり、ライブラリはそのための状態提供に留めます。`examples/basic-player` は3つを合成した `transportBusy` でトランスポート系ボタンを落としています。音声はブラウザのautoplay policyにより通常ユーザー操作後に開始します。シーク時はAudioBufferSourceNodeを指定位置から作り直します。
 
 追加コールバックの `onMediaInfo` はMXFから実際に取得できた構造情報を返し、未取得フィールドは `undefined` のままです。`onTimecode` は現在位置のSMPTEタイムコード、Timecode Trackがない場合は `null` を返します。`onSeekingChange` はシーク処理の開始・終了を通知します。`onBufferingChange` はstreaming映像のバッファ枯渇・復旧、およびseek中の準備状態を重複なく通知します。
 

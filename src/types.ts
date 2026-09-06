@@ -19,6 +19,8 @@ export interface PlayerDiagnostics {
   timecodeSelectionReason?: string;
   videoDecodedFrames: number; videoDecodeMs: number; videoColorConvertMs: number; videoUploadMs: number;
   decoderExecution?: "dedicated-worker"; adaptiveVideoAheadSeconds?: number; adaptiveRefillThresholdSeconds?: number;
+  /** "canvas2d" means WebGL was unavailable and the player fell back to CPU colour conversion. */
+  rendererBackend?: "webgl" | "canvas2d";
   lastChunkDecodeMs?: number; pooledVideoFrames?: number;
 }
 
@@ -37,6 +39,10 @@ export interface H422PlayerHandle {
   seek(seconds: number): Promise<void>;
   /** Seek to an exact media frame represented by an MXF timecode label. */
   seekTimecode(timecode: string): Promise<void>;
+  /** Step whole frames from the current position. Pauses first; negative steps backwards. */
+  stepFrame(frames?: number): Promise<void>;
+  /** Skip relative to the current position, clamped to the media. Keeps playing if it was playing. */
+  seekRelative(seconds: number): Promise<void>;
   readonly currentTime: number;
   readonly duration: number;
   getDiagnostics(): PlayerDiagnostics;
@@ -49,7 +55,11 @@ export interface H422PlayerProps {
   muted?: boolean;
   /** Reader-backed bounded playback. Legacy remains the conservative default. */
   mode?: PlaybackMode;
-  /** CPU YUV-to-RGBA conversion, or direct planar YUV upload with GPU conversion. */
+  /**
+   * Direct planar YUV upload with GPU conversion (default), or CPU YUV-to-RGBA conversion. When
+   * WebGL is unavailable the player falls back to a 2D canvas and forces "rgba" regardless of this
+   * setting; check the `rendererBackend` diagnostic to see whether that happened.
+   */
   videoRenderMode?: VideoRenderMode;
   /** Directory containing the libav runtime copied by copy-libav-assets.mjs. */
   libavBase?: string;

@@ -37,7 +37,44 @@ function texture(gl:WebGLRenderingContext):WebGLTexture {
   return value;
 }
 
-export class WebGlRenderer {
+export interface FrameRenderer {
+  /** Reported as the `rendererBackend` diagnostic so a host can see that WebGL was unavailable. */
+  readonly backend: "webgl" | "canvas2d";
+  draw(frame: TexImageSource | Yuv422Frame, width: number, height: number): void;
+}
+
+/**
+ * Both WebGL paths need a GL context, so a machine without one cannot render at all. This is the
+ * last resort: it only takes ImageData, which is why falling back also forces the `rgba` render
+ * mode — planar YUV has no shader to convert it here.
+ */
+export class Canvas2dRenderer implements FrameRenderer {
+  readonly backend = "canvas2d" as const;
+  private context: CanvasRenderingContext2D;
+  constructor(private canvas: HTMLCanvasElement) {
+    const context = canvas.getContext("2d");
+    if (!context) throw new Error("Neither WebGL nor a 2D canvas context is available");
+    this.context = context;
+  }
+  draw(frame: TexImageSource | Yuv422Frame, width: number, height: number): void {
+    if (!(frame instanceof ImageData)) throw new Error("The 2D canvas renderer needs RGBA frames; use videoRenderMode \"rgba\"");
+    if (this.canvas.width !== width || this.canvas.height !== height) { this.canvas.width = width; this.canvas.height = height; }
+    this.context.putImageData(frame, 0, 0);
+  }
+}
+
+/** WebGL when it is there, a 2D canvas when it is not. Never throws for a missing GL context alone. */
+export function createFrameRenderer(canvas: HTMLCanvasElement): FrameRenderer {
+  try {
+    return new WebGlRenderer(canvas);
+  } catch (error) {
+    console.warn("[H422Player] WebGL is unavailable; falling back to 2D canvas rendering with CPU colour conversion", error);
+    return new Canvas2dRenderer(canvas);
+  }
+}
+
+export class WebGlRenderer implements FrameRenderer {
+  readonly backend = "webgl" as const;
   private gl: WebGLRenderingContext;
   private rgbaProgram:WebGLProgram;
   private yuvProgram:WebGLProgram;
