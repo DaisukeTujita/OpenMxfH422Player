@@ -220,6 +220,12 @@ export function App() {
             音声メーター {meterEnabled ? "ON" : "OFF"}
           </button>
         </div>
+        {meterEnabled && (
+          <p className="meter-hint">
+            音声メーターは映像右端に重ねて表示されます。振れない場合は「STREAMING診断」の音声状態を確認してください
+            (対応PCM音声・ミュート解除・再生速度1x以外では意図的に無音になります)。
+          </p>
+        )}
         <div className="button-row">
           {/* The selected speed comes from the library's onPlaybackRateChange, not from the click. */}
           {[-4, -2, -1.5, 1, 1.5, 2, 4].map(value => (
