@@ -118,7 +118,7 @@ streaming音声はDescriptorが **48 kHz / 24-bit / 2 ch** でSound Essence pack
 `PlayerInfo.audioChannels` は「現在再生可能な音声チャンネル数」です。このため映像のみのstreamingでは
 音声なし、muted、または未対応Descriptorでは `0` を返し、音声Essence Valueを読み込みません。診断には対応状態、選択trackNumber、形式、音声キュー範囲、予約Node数、読込byte数、A/V driftを含みます。
 
-`src`には`File`、`Blob`、またはCORSを許可したURLを指定できます。`ref`から`play()`、`pause()`、`seek(seconds)`、`stepFrame(frames)`、`seekRelative(seconds)`、`seekTimecode(timecode)`、`setPlaybackRate(rate)`、`currentTime`、`duration`、`playbackRate`、`getDiagnostics()`を利用できます。
+`src`には`File`、`Blob`、またはCORSを許可したURLを指定できます。`ref`から`play()`、`pause()`、`seek(seconds)`、`stepFrame(frames)`、`seekRelative(seconds)`、`seekTimecode(timecode)`、`setPlaybackRate(rate)`、`currentTime`、`duration`、`playbackRate`、`state`、`getAudioLevels()`、`setAudioLevelsEnabled(enabled)`、`audioLevelsEnabled`、`getDiagnostics()`を利用できます。
 
 `stepFrame(frames)` はコマ送り／コマ戻しです（負値で後方）。再生中に呼ぶと**先に一時停止します**。そうしないと再生時計が進んで、seekが着地する前に目的フレームを通り過ぎるためです。`seekRelative(seconds)` は相対スキップで、素材範囲へクランプされ、再生中ならそのまま再生を続けます。どちらも既存の世代管理付きseekを経由するため、`onSeekingChange` が通常どおり通知されます。
 
@@ -143,11 +143,110 @@ streaming音声はDescriptorが **48 kHz / 24-bit / 2 ch** でSound Essence pack
 
 Iフレームの位置はMXF Index EntryのKeyFrameOffset / RandomAccessPoint / Flagsから判定します。**索引にRandom Access Pointが1つも無い素材では間引き再生ができず**、その旨のエラーになります。実際にどちらで動作しているかは診断値 `frameSelection`（`"all-frames"` / `"key-frames"`）と `audioPlaybackRate`（ミュート時は `0`）で確認できます。
 
-速度変更でフレーム選択方式または方向が変わると、キューの中身が用をなさなくなる（密度が違う／進行方向と反対側を保持している）ため、内部で現在位置へ再シークしてキューを詰め直します。同じ方式内での変更は再生時計の張り直しだけです。
+#### 現在の速度を知る
 
-シーク中・バッファリング中の状態は `onSeekingChange` / `onBufferingChange`、および `PlayerStatus` の `buffering` として公開します。**どのUIを非活性にするかはホストアプリの責務**であり、ライブラリはそのための状態提供に留めます。`examples/basic-player` は3つを合成した `transportBusy` でトランスポート系ボタンを落としています。音声はブラウザのautoplay policyにより通常ユーザー操作後に開始します。シーク時はAudioBufferSourceNodeを指定位置から作り直します。
+現在値は `ref.playbackRate`（符号付き）と診断値 `playbackRate` で読めます。変化の通知は
+`onPlaybackRateChange(rate, info)` です。**速度を変えた経路によらず**、エンジンが実際に採用した値だけを
+1回通知します（同じ値の再設定では発火しません）。素材の読み込み完了時にも現在値を1回通知するため、
+購読側は初期値を別途問い合わせる必要がありません。`info` には速度そのものに加えて、
+`frameSelection`（`"all-frames"` / `"key-frames"`）と `audioPlaybackRate`（ミュート時 `0`）が入ります。
+速度ボタンのハイライトは、クリック値ではなくこの通知値で行ってください。閾値をまたいだ操作や
+将来の自動フォールバックでも、UIとエンジンの表示がずれません。
 
-追加コールバックの `onMediaInfo` はMXFから実際に取得できた構造情報を返し、未取得フィールドは `undefined` のままです。`onTimecode` は現在位置のSMPTEタイムコード、Timecode Trackがない場合は `null` を返します。`onSeekingChange` はシーク処理の開始・終了を通知します。`onBufferingChange` はstreaming映像のバッファ枯渇・復旧、およびseek中の準備状態を重複なく通知します。
+#### 再生を止めない速度変更
+
+`setPlaybackRate()` は**一時停止を要求しませんし、内部で停止と再開もしません**。再生中に呼べば再生中のまま
+切り替わります。同じフレーム選択方式内での変更（例: 1.0x → 1.5x）は再生時計の張り直しと音声予約の
+作り直しだけで、映像の供給は途切れません。
+
+方式をまたぐ変更のうち、**同じ方向で全フレーム→Iフレーム間引きへ上げる場合（例: 1.0x → 4.0x）は
+再シークしません。** 全フレームのキューは間引き再生が表示するIフレームをすべて含んでいるため、キューを
+保持したまま以降の補充だけを間引きへ切り替えれば、映像は途切れずに進みます。このときデコード済みの
+末尾（`queuedThroughFrame`）を間引き補充の開始点として引き継ぐため、同じ区間を二度デコードしません。
+再生中にこの切り替えを行う条件は、新しい速度で**0.5秒以上の実時間**を賄えるだけのキューが
+先読み側に残っていることです。足りない場合は下と同じ再シークにフォールバックします。
+
+それ以外の方式変更、すなわち**Iフレーム間引き→全フレームへ戻す場合（例: 4.0x → 1.0x）と方向反転**は
+再シークします。前者はIフレームの間のフレームが、後者は進行方向と反対側のフレームが、いずれもキューに
+存在しないためです。この間の状態は `seeking` になり、キューが埋まると同じ位置から再生を再開します。
+
+なお方式をまたぐ変更では**音声の連続性は保てません**。上の表のとおり間引き再生と逆再生は音声をミュートし、
+予約済みのAudioBufferSourceNodeをすべて解放するためです。速度を1.0xへ戻すと、再シーク後に同じ位置から
+音声予約を作り直します。
+
+### 再生状態とローディング表示
+
+待ち状態は個別のフラグではなく、購読可能な1つの列挙値 `PlayerState` として公開します。
+
+| 値 | 意味 |
+|---|---|
+| `idle` | 素材未指定 |
+| `loading` | ファイル読み込み・解析中（**待ち**） |
+| `ready` | 読み込み完了、未再生 |
+| `seeking` | シーク中。**速度変更に伴う再初期化もここに入ります**（**待ち**） |
+| `buffering` | バッファ枯渇による停止、または補充待ち（**待ち**） |
+| `playing` / `paused` / `ended` | 定常状態 |
+| `error` | 失敗 |
+
+```tsx
+import { H422Player, isWaitingPlayerState, type PlayerState } from "@openmxf/h422-player";
+
+const [state, setState] = useState<PlayerState>("idle");
+<H422Player src={file} onStateChange={setState} />
+{isWaitingPlayerState(state) && <Spinner />}
+```
+
+`onStateChange` は**値が実際に変わったときだけ**1回通知します。`WAITING_PLAYER_STATES` と
+`isWaitingPlayerState(state)` は「スピナーを出し、操作を落とす」区間、すなわち `loading` / `seeking` /
+`buffering` を判定するためのヘルパーです。合成規則は `derivePlayerState()` として公開しており、
+`error` > `loading` > `seeking` > `buffering` の順で優先します。シークが枯渇補充を伴っても
+`buffering` ではなく `seeking` と報告するのは、原因の方をホストに見せるためです。
+
+従来の `onStatusChange`（`PlayerStatus`）、`onSeekingChange`、`onBufferingChange` は**そのまま残ります**。
+`PlayerState` はそれらを合成した派生値であり、置き換えではありません。**どのUIを非活性にするかは
+ホストアプリの責務**で、ライブラリは状態提供に留めます。`examples/basic-player` は
+`isWaitingPlayerState()` の結果でスピナーを重ね、再生／一時停止／シーク／速度変更ボタンを落としています。
+音声はブラウザのautoplay policyにより通常ユーザー操作後に開始します。シーク時はAudioBufferSourceNodeを
+指定位置から作り直します。
+
+### 音声レベルメーター
+
+再生中の音声レベルを一定間隔で計測して通知します。**計測はライブラリ、描画はホスト**の分担です。
+
+```tsx
+import { H422Player, type AudioLevels } from "@openmxf/h422-player";
+
+const [levels, setLevels] = useState<AudioLevels>();
+<H422Player src={file} enableAudioLevels={metersVisible} onAudioLevelUpdate={setLevels} audioLevelIntervalMs={100} />
+```
+
+- **値**: チャンネルごとに `peak` / `rms`（線形、フルスケール1.0）と `peakDb` / `rmsDb`（dBFS）。
+  dB値は `AUDIO_LEVEL_SILENCE_DB`（-100 dBFS）で下限クランプします。デジタル無音は -∞ dBで、
+  そのままではメーターのレイアウトができないためです。24-bit素材のノイズフロアより下なので
+  可聴情報は失われません。フルスケールを超える素材は 0 dBFSでクランプせず、そのまま正値になります。
+- **対象チャンネル**: 先頭の1ch・2chのみ。3ch以上ある素材でも3ch目以降は読みません
+  （`AUDIO_LEVEL_MAX_CHANNELS`）。
+- **更新頻度**: `audioLevelIntervalMs`（既定 `DEFAULT_AUDIO_LEVEL_INTERVAL_MS` = 100 ms）。この値は
+  計測窓の長さでもあります。100 msは29.97 fpsで約3フレームに1回で、メーターの追従としては十分速く、
+  1回あたり48 kHz×2chで9,600サンプル程度の走査に収まります。下限は映像1フレーム分で、それより
+  短くしても同じ窓を二度読むだけです。この値はマウント時に読み、以降の変更は反映しません。
+- **計測方法**: 出力にAnalyserNodeを挿すのではなく、**デコード済みPCMを再生位置から読んで**計測します。
+  音声グラフはこのプレイヤーで再生タイミングが依存している唯一の場所であり、そこに分岐を足したくないこと、
+  およびlegacyモードでは意味のある値が取れないことが理由です。窓は再生位置から**前方**へ取ります。
+  再生位置より後ろのフレームは約100 msで破棄されるため、後方窓では破棄と競合します。
+- **静音を返す条件**: 再生中でないとき、速度によって音声がミュートされているとき（間引き・逆再生）、
+  および音声が無い・未対応形式のとき。最後の値を保持せず、メーターが下がりきります。
+- **有効/無効**: `enableAudioLevels`（既定 `false`）。無効の間はタイマー自体が存在せず、サンプルを
+  1つも読みません。`ref.setAudioLevelsEnabled(enabled)` で実行時に切り替えられ、**この切り替えでは
+  ファイルを読み直しません**。`ref.getAudioLevels()` は最新値（無効時は `null`）を返します。
+- **既知の制約**: `muted` で初期化した場合、streaming音声はそもそも読み込まれないため、レベルは
+  常に無音です。またレベルは復号したPCMそのものの値で、AudioContextの出力ゲインは反映しません。
+
+`examples/basic-player` は動画の右端に1ch・2chの縦バーを置き、トグルボタンで
+`enableAudioLevels` ごと切り替えます（非表示時は計測も止まります）。色分け・目盛り・
+ピークホールドの見た目はデモ側の設計です。
+
+追加コールバックの `onMediaInfo` はMXFから実際に取得できた構造情報を返し、未取得フィールドは `undefined` のままです。`onTimecode` は現在位置のSMPTEタイムコード、Timecode Trackがない場合は `null` を返します。`onSeekingChange` はシーク処理の開始・終了を通知します。`onBufferingChange` はstreaming映像のバッファ枯渇・復旧、およびseek中の準備状態を重複なく通知します。`onStateChange` はそれらを合成した `PlayerState`、`onPlaybackRateChange` は採用された再生速度とその含意、`onAudioLevelUpdate` は1ch・2chの音声レベルを通知します。
 
 ## MXF解析
 
