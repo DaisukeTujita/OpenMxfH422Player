@@ -6,6 +6,8 @@ export interface PlayerDiagnostics {
   mode: PlaybackMode; videoRenderMode: VideoRenderMode; fileSize: number; bytesLoaded: number; underlyingReadCount: number;
   cacheBytes: number; videoQueueFrames: number; videoQueueStart: number | null;
   videoQueueEnd: number | null; scheduledAudioRanges: number; loadGeneration: number; seekGeneration: number;
+  /** Decoded video held in memory, and the ceiling it is held under. */
+  videoQueueBytes?: number; videoQueueMaxBytes?: number;
   streamingAudioSupported: boolean; selectedAudioTrackNumber: number | null;
   audioSampleRate: number | null; audioChannels: number | null; audioQueueStart: number | null;
   audioQueueEnd: number | null; audioVideoDriftMs: number | null; audioBytesLoaded: number;
@@ -51,6 +53,12 @@ export interface H422PlayerProps {
   videoRenderMode?: VideoRenderMode;
   /** Directory containing the libav runtime copied by copy-libav-assets.mjs. */
   libavBase?: string;
+  /**
+   * Ceiling on decoded video held in memory, in bytes. Applied alongside the look-ahead target in
+   * seconds; whichever binds first stops the refill. Raise it on machines with memory to spare,
+   * lower it to share the tab with other work. Defaults to DEFAULT_VIDEO_QUEUE_MAX_BYTES.
+   */
+  videoQueueMaxBytes?: number;
   className?: string;
   onReady?: (info: PlayerInfo) => void;
   /** Structural MXF metadata. Missing fields remain undefined rather than receiving playback fallbacks. */

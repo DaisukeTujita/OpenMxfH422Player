@@ -93,6 +93,11 @@ export function renderFrameBuffers(frame: ImageData | Yuv422Frame): ArrayBuffer[
   return "u" in frame ? [frame.y.buffer as ArrayBuffer, frame.u.buffer as ArrayBuffer, frame.v.buffer as ArrayBuffer] : [frame.data.buffer as ArrayBuffer];
 }
 
+/** What one queued frame costs, so the engine can hold its queue to a byte budget. */
+export function renderFrameBytes(frame: ImageData | Yuv422Frame): number {
+  return renderFrameBuffers(frame).reduce((total, buffer) => total + buffer.byteLength, 0);
+}
+
 /** Requests are serialized by the Worker, so a decoder is never in use when it is freed; `disposed` only guards against freeing the same context twice. */
 interface StreamingDecoderState { av: LibAV; codecId: number; ctx: number; pkt: number; frame: number; loadGeneration: number; seekGeneration: number; disposed: boolean }
 

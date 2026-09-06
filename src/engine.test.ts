@@ -81,6 +81,45 @@ describe("PlayerEngine adaptive streaming buffer", () => {
   });
 });
 
+describe("PlayerEngine video queue byte ceiling", () => {
+  // 4 MB per frame at 30 fps with 3 s chunks: an 800 MB budget is 200 frames, a chunk is 90 of them.
+  const frameBytes = 4 * 1024 * 1024, budget = 800 * 1024 * 1024;
+  function engineWith(overrides: Record<string, unknown> = {}) {
+    const engine = Object.create(PlayerEngine.prototype) as any;
+    Object.assign(engine, { frames: [], essenceIndex: { frameRate: 30 }, chunkSeconds: 3, frameBytes, videoQueueMaxBytes: budget, adaptiveVideoAheadSeconds: 9, adaptiveRefillThresholdSeconds: 7, videoAheadSeconds: 6, refillThresholdSeconds: 4, ...overrides });
+    return engine;
+  }
+
+  it("clamps the look-ahead so the chunk that lands on top still fits the budget", () => {
+    // 200 frames of budget minus the 90-frame chunk a refill adds leaves 110 frames of look-ahead.
+    expect(engineWith().aheadSecondsTarget()).toBeCloseTo(110 / 30);
+    // A budget far above the seconds target leaves the seconds target in charge.
+    expect(engineWith({ videoQueueMaxBytes: 8 * 1024 * 1024 * 1024 }).aheadSecondsTarget()).toBe(9);
+  });
+
+  it("keeps the refill threshold under the clamped look-ahead so a refill can still be triggered", () => {
+    const engine = engineWith();
+    expect(engine.refillThresholdTarget()).toBeLessThan(engine.aheadSecondsTarget());
+    expect(engine.refillThresholdTarget()).toBeGreaterThan(0);
+  });
+
+  it("still asks for one frame when the budget cannot even cover a chunk", () => {
+    expect(engineWith({ videoQueueMaxBytes: 1024 }).aheadSecondsTarget()).toBeCloseTo(1 / 30);
+  });
+
+  it("falls back to the seconds target until a decoded frame has established the frame size", () => {
+    expect(engineWith({ frameBytes: 0 }).aheadSecondsTarget()).toBe(9);
+  });
+
+  it("reports the queue's byte size and its ceiling", () => {
+    const engine = engineWith({ frames: [1, 2, 3], mode: "streaming", videoRenderMode: "yuv-webgl", audioChunks: [], scheduledAudio: [] });
+    const diagnostics = engine.getDiagnostics();
+    expect(diagnostics.videoQueueBytes).toBe(3 * frameBytes);
+    expect(diagnostics.videoQueueMaxBytes).toBe(budget);
+    expect(diagnostics.adaptiveVideoAheadSeconds).toBeCloseTo(110 / 30);
+  });
+});
+
 describe("PlayerEngine decodeVideo/decodeStreamingVideo delegate to the video decoder client", () => {
   function fakeClient(overrides: Partial<Record<string, any>> = {}) {
     return {
@@ -106,7 +145,7 @@ describe("PlayerEngine decodeVideo/decodeStreamingVideo delegate to the video de
   it("decodeStreamingVideo forwards to the client, updates the buffer estimate, and remembers the decoder generation", async () => {
     const client = fakeClient();
     const engine = Object.create(PlayerEngine.prototype) as any;
-    Object.assign(engine, { dependencies: { createVideoDecoder: () => client }, loadGeneration: 1, seekGeneration: 2, videoRenderMode: "yuv-webgl", videoCodecId: 2, durationValue: 10, videoDecodeMs: 0, videoColorConvertMs: 0, videoDecodedFrames: 0, adaptiveVideoAheadSeconds: 6, adaptiveRefillThresholdSeconds: 4, videoAheadSeconds: 6, refillThresholdSeconds: 4, chunkSeconds: 3 });
+    Object.assign(engine, { dependencies: { createVideoDecoder: () => client }, frames: [], loadGeneration: 1, seekGeneration: 2, videoRenderMode: "yuv-webgl", videoCodecId: 2, durationValue: 10, videoDecodeMs: 0, videoColorConvertMs: 0, videoDecodedFrames: 0, adaptiveVideoAheadSeconds: 6, adaptiveRefillThresholdSeconds: 4, videoAheadSeconds: 6, refillThresholdSeconds: 4, chunkSeconds: 3 });
     await engine.decodeStreamingVideo([new Uint8Array([1])], [0], 30, false, 1, 2);
     expect(client.decodeStreamingVideo).toHaveBeenCalledWith([new Uint8Array([1])], [0], 30, false, 1, 2, 2, "yuv-webgl", 300, []);
     expect(engine.streamingDecoderGeneration).toEqual({ loadGeneration: 1, seekGeneration: 2 });
@@ -115,7 +154,7 @@ describe("PlayerEngine decodeVideo/decodeStreamingVideo delegate to the video de
   it("discards a decode that a seek superseded instead of letting it steer the buffer estimate", async () => {
     const client = fakeClient();
     const engine = Object.create(PlayerEngine.prototype) as any;
-    Object.assign(engine, { dependencies: { createVideoDecoder: () => client }, loadGeneration: 1, seekGeneration: 2, videoRenderMode: "yuv-webgl", videoCodecId: 2, durationValue: 10, videoDecodeMs: 0, videoColorConvertMs: 0, videoDecodedFrames: 0, adaptiveVideoAheadSeconds: 6, adaptiveRefillThresholdSeconds: 4, videoAheadSeconds: 6, refillThresholdSeconds: 4, chunkSeconds: 3, streamingDecoderGeneration: undefined });
+    Object.assign(engine, { dependencies: { createVideoDecoder: () => client }, frames: [], loadGeneration: 1, seekGeneration: 2, videoRenderMode: "yuv-webgl", videoCodecId: 2, durationValue: 10, videoDecodeMs: 0, videoColorConvertMs: 0, videoDecodedFrames: 0, adaptiveVideoAheadSeconds: 6, adaptiveRefillThresholdSeconds: 4, videoAheadSeconds: 6, refillThresholdSeconds: 4, chunkSeconds: 3, streamingDecoderGeneration: undefined });
 
     // The seek that superseded this decode already bumped seekGeneration to 3.
     engine.seekGeneration = 3;

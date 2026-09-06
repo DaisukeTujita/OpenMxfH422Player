@@ -68,6 +68,26 @@ export default function Preview({ file }: { file: File }) {
 MXF先頭にSMPTEで許容される最大65,535 byteのRun-inがある場合も、Header Partitionを検出して部分読み込みを開始します。Timecode Trackは再生の必須条件ではなく、存在しない素材ではタイムコード表示とタイムコード指定ジャンプだけが無効になります。
 `ref.getDiagnostics()` と `onDiagnostics` からReader I/O、キャッシュ、キュー、世代を確認できます。
 
+### 映像キューのメモリ上限
+
+デコード済みフレームがこのプレイヤーのメモリ使用量の大半を占めます。1080ラインの4:2:2は1フレーム約4.15 MBなので、先読みを秒数だけで管理すると適応バッファが落ち着く9秒で1.2〜1.5 GBに達します。`videoQueueMaxBytes` は保持するデコード済み映像のバイト数上限で、秒数の先読み目標と**併用**され、先に到達した方が補充を止めます。
+
+```tsx
+import { H422Player, DEFAULT_VIDEO_QUEUE_MAX_BYTES } from "@openmxf/h422-player";
+
+<H422Player src={file} mode="streaming" videoQueueMaxBytes={256 * 1024 * 1024} />
+```
+
+補充は1回で `chunkSeconds` 分をまとめてデコードするため、キューのピークは「先読み＋1チャンク」になります。上限からチャンク1個分を差し引いた値が先読み目標になり、ピークが上限に一致します。
+
+下限を決めるのは好みではなく停止です。先読みがチャンク1個のデコード時間（1080iの3秒チャンクで実測約2.7秒）を下回ると、補充のたびに再生が枯渇します。
+
+既定値 `DEFAULT_VIDEO_QUEUE_MAX_BYTES` は1 GiBです。1080i素材で約258フレーム、うち先読みが約168フレーム（29.97 fpsで約5.6秒）、その上に90フレームのチャンクが乗ります。
+
+この値は計算ではなく実測で決めています。参照用の1080iサンプルでは、上限なしの約1467 MBに対して**約730 MBで、バッファリング停止なしに再生**できました。先読みが約3.5秒しか残らない768 MiBでは、同じマシンで負荷によりデコードが遅くなった際に停止しました。なお**効くのは上限値よりマシン性能です**。デコードは負荷状況により0.6〜1.2倍リアルタイムの幅で変動し、デコードが追いつかない状態はどんなバッファサイズでも救えません。
+
+引き上げると停止しにくくなります。**チャンク2個分を下回る値まで下げると、先読みがチャンク1個のデコードを覆えなくなるため、メモリと引き換えに再生の滑らかさを失います。** 現在値と上限は診断値 `videoQueueBytes` / `videoQueueMaxBytes` で確認できます。
+
 streaming音声はDescriptorが **48 kHz / 24-bit / 2 ch** でSound Essence packetが存在し、取得できたBlockAlignが6、取得できたSound Essence Coding ULが非圧縮PCM系の場合に対応します。signed PCM・big-endian・BlockAlignがメタデータで明示されない素材では、対応対象であるXDCAM HD422 OP1aプロファイルからPCM S24BE（BlockAlign 6 byte）と推定しており、完全にメタデータ判定済みとは表示しません。複数トラックはKLV検出順の最初のステレオtrackNumberを選び、選択理由をログへ出します。Descriptorが欠落または不一致なら固定値で推測せず、理由を警告して映像のみ再生へフォールバックします。音声はReaderから3秒先まで（単一read最大4 MiB）だけ取得し、約0.75秒のAudioBufferへ変換します。残量1.25秒で補充し、再生済み区間を破棄するため未再生キューは概ね3秒（補充中も最大約5秒）です。performance.now()を映像・media timeのマスター時計、AudioContextを音声予約時計として使用し、audioVideoDriftMsで差を監視します。開始時は両時計を30 ms後の同一点へ揃えます。各区間はmedia timeアンカーから予約し（大きな無音区間を詰めず）、pause/seek/buffering/endedでは全Nodeをstop・disconnect、復旧時は同一media timeからNodeを作り直します。音声には映像prerollを適用せず、seek packet内も6-byte境界で切り出し、映像durationを越えて予約しません。映像または対応音声が枯渇した場合は再生時計を停止してbufferingを通知し、補充後に同じ位置から再開します。Index Tableの
 `StreamOffset`はBodySIDのEssence Container stream先頭を基準とする相対値であり、Partitionの
 絶対位置へ単純加算できません。本実装は推測による直接変換をせず、安全なKLVヘッダー順次索引へ
