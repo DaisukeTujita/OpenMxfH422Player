@@ -21,6 +21,10 @@ export interface PlayerDiagnostics {
   decoderExecution?: "dedicated-worker"; adaptiveVideoAheadSeconds?: number; adaptiveRefillThresholdSeconds?: number;
   /** "canvas2d" means WebGL was unavailable and the player fell back to CPU colour conversion. */
   rendererBackend?: "webgl" | "canvas2d";
+  /** Signed: negative is reverse. `frameSelection` says whether that rate is decoding every frame. */
+  playbackRate?: number; frameSelection?: "all-frames" | "key-frames";
+  /** 0 when audio is muted because the rate is decimated or reversed. */
+  audioPlaybackRate?: number;
   lastChunkDecodeMs?: number; pooledVideoFrames?: number;
 }
 
@@ -43,6 +47,12 @@ export interface H422PlayerHandle {
   stepFrame(frames?: number): Promise<void>;
   /** Skip relative to the current position, clamped to the media. Keeps playing if it was playing. */
   seekRelative(seconds: number): Promise<void>;
+  /**
+   * Signed playback rate; negative plays backwards. Rejects 0 — use `pause()`. Rates above
+   * `fullDecodeMaxRate`, and every reverse rate, switch to decoding only key frames.
+   */
+  setPlaybackRate(rate: number): Promise<void>;
+  readonly playbackRate: number;
   readonly currentTime: number;
   readonly duration: number;
   getDiagnostics(): PlayerDiagnostics;
@@ -69,6 +79,12 @@ export interface H422PlayerProps {
    * lower it to share the tab with other work. Defaults to DEFAULT_VIDEO_QUEUE_MAX_BYTES.
    */
   videoQueueMaxBytes?: number;
+  /**
+   * Highest forward rate that still decodes every frame. Above it, and for any reverse rate, the
+   * player decodes only random-access frames and displays them decimated. Raise it if the decoder
+   * gets faster. Defaults to DEFAULT_FULL_DECODE_MAX_RATE.
+   */
+  fullDecodeMaxRate?: number;
   className?: string;
   onReady?: (info: PlayerInfo) => void;
   /** Structural MXF metadata. Missing fields remain undefined rather than receiving playback fallbacks. */

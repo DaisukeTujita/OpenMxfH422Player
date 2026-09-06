@@ -133,6 +133,96 @@ describe("PlayerEngine relative movement", () => {
   });
 });
 
+describe("PlayerEngine playback rate", () => {
+  afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
+
+  function engineWith(overrides: Record<string, unknown> = {}) {
+    const engine = Object.create(PlayerEngine.prototype) as any;
+    Object.assign(engine, { mode: "streaming", status: "paused", pausedAt: 4, durationValue: 20, playbackRateValue: 1, fullDecodeMaxRate: 1.5, retainBehindSeconds: 1, frames: [], essenceIndex: { frameRate: 30 }, audioChunks: [], scheduledAudio: [], seek: vi.fn().mockResolvedValue(undefined), publishDiagnostics: vi.fn(), resetAndScheduleStreamingAudio: vi.fn(), ...overrides });
+    return engine;
+  }
+
+  it("decodes every frame up to the threshold and only key frames past it", () => {
+    expect(engineWith({ playbackRateValue: 1 }).frameSelection()).toBe("all-frames");
+    expect(engineWith({ playbackRateValue: 1.5 }).frameSelection()).toBe("all-frames");
+    expect(engineWith({ playbackRateValue: 2 }).frameSelection()).toBe("key-frames");
+    expect(engineWith({ playbackRateValue: 4 }).frameSelection()).toBe("key-frames");
+  });
+
+  it("decimates every reverse rate, because Long-GOP has no backwards decode", () => {
+    expect(engineWith({ playbackRateValue: -1 }).frameSelection()).toBe("key-frames");
+    expect(engineWith({ playbackRateValue: -1.5 }).frameSelection()).toBe("key-frames");
+  });
+
+  it("follows a raised threshold, so a faster decoder can play more rates in full", () => {
+    expect(engineWith({ playbackRateValue: 2, fullDecodeMaxRate: 3 }).frameSelection()).toBe("all-frames");
+  });
+
+  it("rejects a rate that would mean playing without moving", async () => {
+    await expect(engineWith().setPlaybackRate(0)).rejects.toThrow("non-zero");
+    await expect(engineWith().setPlaybackRate(Number.NaN)).rejects.toThrow("finite");
+  });
+
+  it("re-seeks when the selection mode changes, since the queue is the wrong density", async () => {
+    const engine = engineWith({ playbackRateValue: 1 });
+    await engine.setPlaybackRate(4);
+    expect(engine.seek).toHaveBeenCalledWith(4);
+  });
+
+  it("re-seeks when direction flips, since the queue covers the wrong side", async () => {
+    const engine = engineWith({ playbackRateValue: -2, keyFrameCoverage: { from: 10, to: 40 } });
+    await engine.setPlaybackRate(2);
+    expect(engine.seek).toHaveBeenCalledWith(4);
+    expect(engine.keyFrameCoverage).toBeUndefined();
+  });
+
+  it("only re-anchors the clock for a rate change inside one mode", async () => {
+    vi.spyOn(performance, "now").mockReturnValue(1000);
+    const engine = engineWith({ playbackRateValue: 1, status: "playing", playAnchorMedia: 0, playAnchorWall: 0 });
+    await engine.setPlaybackRate(1.5);
+    expect(engine.seek).not.toHaveBeenCalled();
+    expect(engine.playAnchorMedia).toBe(1);
+    expect(engine.playAnchorWall).toBe(1000);
+  });
+
+  it("runs the media clock backwards at the requested rate", () => {
+    vi.spyOn(performance, "now").mockReturnValue(2000);
+    const engine = engineWith({ status: "playing", playbackRateValue: -2, playAnchorMedia: 10, playAnchorWall: 1000 });
+    // One wall second at -2x moves two media seconds back.
+    expect(engine.currentTime).toBe(8);
+  });
+
+  it("never runs the clock outside the media", () => {
+    vi.spyOn(performance, "now").mockReturnValue(20000);
+    expect(engineWith({ status: "playing", playbackRateValue: -4, playAnchorMedia: 1, playAnchorWall: 0 }).currentTime).toBe(0);
+    expect(engineWith({ status: "playing", playbackRateValue: 4, playAnchorMedia: 1, playAnchorWall: 0 }).currentTime).toBe(20);
+  });
+
+  it("evicts on the side the playhead came from, whichever way it is moving", () => {
+    const frames = [0, 1, 2, 3, 4, 5, 6].map(time => ({ frame: planarFrame(), time, mediaFrame: time * 30 }));
+    const forward = engineWith({ frames: [...frames] });
+    forward.evictPlayedMedia(4);
+    expect(forward.frames.map((f: any) => f.time)).toEqual([3, 4, 5, 6]);
+
+    const reverse = engineWith({ frames: [...frames], playbackRateValue: -2 });
+    reverse.evictPlayedMedia(2);
+    expect(reverse.frames.map((f: any) => f.time)).toEqual([0, 1, 2, 3]);
+  });
+
+  it("mutes audio above the full-decode rate and in reverse", () => {
+    expect(engineWith({ playbackRateValue: 1 }).audioPlaybackRate()).toBe(1);
+    expect(engineWith({ playbackRateValue: 1.5 }).audioPlaybackRate()).toBe(1.5);
+    expect(engineWith({ playbackRateValue: 2 }).audioPlaybackRate()).toBe(0);
+    expect(engineWith({ playbackRateValue: -1 }).audioPlaybackRate()).toBe(0);
+  });
+
+  it("measures the buffer in the direction of travel", () => {
+    const frames = [2, 3, 4, 5].map(time => ({ frame: planarFrame(), time, mediaFrame: time * 30 }));
+    expect(engineWith({ frames }).bufferedAhead(3)).toBe(2);
+    expect(engineWith({ frames, playbackRateValue: -2 }).bufferedAhead(4)).toBe(2);
+  });
+});
+
 describe("PlayerEngine video queue byte ceiling", () => {
   // 4 MB per frame at 30 fps with 3 s chunks: an 800 MB budget is 200 frames, a chunk is 90 of them.
   const frameBytes = 4 * 1024 * 1024, budget = 800 * 1024 * 1024;
@@ -366,7 +456,7 @@ describe("PlayerEngine streaming mode",()=>{
   function streamingPlaybackHarness(){
     const callbacks={status:vi.fn(),ready:vi.fn(),time:vi.fn(),error:vi.fn(),seeking:vi.fn(),buffering:vi.fn(),diagnostics:vi.fn(),timecode:vi.fn()};
     const engine=Object.create(PlayerEngine.prototype) as any;
-    Object.assign(engine,{callbacks,renderer:{draw:vi.fn(),backend:"webgl"},mode:"streaming",status:"playing",frames:[],loadGeneration:1,seekGeneration:1,destroyed:false,videoAheadSeconds:6,retainBehindSeconds:1,refillThresholdSeconds:4,chunkSeconds:3,maxReadSize:1024,durationValue:200,startedAt:0,pausedAt:0,queuedThroughFrame:-1,videoCodecId:2,essenceIndex:{frameRate:10,packets:[]},reader:{},libav:{},raf:0,buffering:false,resumeAfterBuffer:false});
+    Object.assign(engine,{callbacks,renderer:{draw:vi.fn(),backend:"webgl"},mode:"streaming",status:"playing",frames:[],loadGeneration:1,seekGeneration:1,destroyed:false,videoAheadSeconds:6,retainBehindSeconds:1,refillThresholdSeconds:4,chunkSeconds:3,maxReadSize:1024,durationValue:200,playAnchorMedia:0,playAnchorWall:0,playbackRateValue:1,pausedAt:0,queuedThroughFrame:-1,videoCodecId:2,essenceIndex:{frameRate:10,packets:[]},reader:{},libav:{},raf:0,buffering:false,resumeAfterBuffer:false});
     return {engine,callbacks};
   }
 
@@ -540,7 +630,7 @@ function playbackHarness() {
   const audio={destination:{},resume:vi.fn(),suspend:vi.fn(),close:vi.fn(),createBufferSource:vi.fn(()=>{const source={stop:vi.fn(),disconnect:vi.fn(),connect:vi.fn(),start:vi.fn(),buffer:undefined};sources.push(source);return source;})};
   const callbacks={status:vi.fn(),ready:vi.fn(),time:vi.fn(),error:vi.fn(),timecode:vi.fn(),seeking:vi.fn()};
   const engine=Object.create(PlayerEngine.prototype) as any;
-  Object.assign(engine,{callbacks,renderer:{draw:vi.fn(),backend:"webgl"},audio,audioBuffer:{duration:20},status:"ready",pausedAt:0,durationValue:1,frames:[{frame:planarFrame(),time:0}],destroyed:false,loadGeneration:0,seekGeneration:0,raf:0});
+  Object.assign(engine,{callbacks,renderer:{draw:vi.fn(),backend:"webgl"},audio,audioBuffer:{duration:20},status:"ready",playbackRateValue:1,pausedAt:0,durationValue:1,frames:[{frame:planarFrame(),time:0}],destroyed:false,loadGeneration:0,seekGeneration:0,raf:0});
   return {engine,audio,callbacks,sources};
 }
 
@@ -561,13 +651,13 @@ describe("PlayerEngine streaming audio",()=>{
   }
   it("reads only the selected three-second audio range without video preroll and converts a bounded chunk",async()=>{const h=audioHarness();await h.engine.fillStreamingAudio(1,new AbortController().signal,2,3);expect(h.readRange).toHaveBeenCalledWith(h.engine.reader,h.engine.essenceIndex,expect.objectContaining({startFrame:10,endFrame:39,prerollFrames:0,kinds:["audio"],trackNumbers:[7]}));expect(h.audio.createBuffer).toHaveBeenCalledWith(2,2,48000);expect(h.engine.audioBytesLoaded).toBe(12);expect(h.engine.audioChunks).toHaveLength(1);});
   it("schedules adjacent chunks with fresh nodes and never past duration",()=>{const h=audioHarness();h.engine.durationValue=2;h.engine.audioChunks=[{mediaStartTime:1,mediaEndTime:1.5,buffer:{duration:.5},generation:3,scheduled:false},{mediaStartTime:1.5,mediaEndTime:2.5,buffer:{duration:1},generation:3,scheduled:false}];h.engine.resetAndScheduleStreamingAudio(1);expect(h.sources).toHaveLength(2);expect(h.sources[0].start).toHaveBeenCalledWith(10.03,0,.5);expect(h.sources[1].start).toHaveBeenCalledWith(10.53,0,.5);});
-  it("stops and disconnects every scheduled node on pause",()=>{vi.stubGlobal("cancelAnimationFrame",vi.fn());const h=audioHarness();h.engine.status="playing";h.engine.startedAt=performance.now()-1000;h.engine.audioChunks=[{mediaStartTime:1,mediaEndTime:2,buffer:{duration:1},generation:3,scheduled:false}];h.engine.resetAndScheduleStreamingAudio(1);h.engine.pause();expect(h.sources[0].stop).toHaveBeenCalledOnce();expect(h.sources[0].disconnect).toHaveBeenCalledOnce();});
+  it("stops and disconnects every scheduled node on pause",()=>{vi.stubGlobal("cancelAnimationFrame",vi.fn());const h=audioHarness();h.engine.status="playing";h.engine.anchorPlayback(1);h.engine.audioChunks=[{mediaStartTime:1,mediaEndTime:2,buffer:{duration:1},generation:3,scheduled:false}];h.engine.resetAndScheduleStreamingAudio(1);h.engine.pause();expect(h.sources[0].stop).toHaveBeenCalledOnce();expect(h.sources[0].disconnect).toHaveBeenCalledOnce();});
 });
 
 // Regression coverage for gap-preserving append scheduling and coordinated recovery.
 describe("PlayerEngine streaming audio scheduling regressions",()=>{
   const chunk=(start:number,end:number,generation=3)=>({mediaStartTime:start,mediaEndTime:end,buffer:{duration:end-start},generation,scheduled:false});
-  function harness(){const sources:any[]=[];const audio={currentTime:5,destination:{},resume:vi.fn(),suspend:vi.fn(),close:vi.fn(),createBufferSource:vi.fn(()=>{const node={buffer:undefined,connect:vi.fn(),start:vi.fn(),stop:vi.fn(),disconnect:vi.fn(),onended:null};sources.push(node);return node;})};const callbacks={status:vi.fn(),ready:vi.fn(),time:vi.fn(),error:vi.fn(),buffering:vi.fn(),timecode:vi.fn()};const engine=Object.create(PlayerEngine.prototype) as any;Object.assign(engine,{audio,sources,callbacks,renderer:{draw:vi.fn(),backend:"webgl"},mode:"streaming",streamingAudioSupported:true,audioChunks:[],scheduledAudio:[],audioExhausted:false,lastAudioTime:0,frames:[],durationValue:20,pausedAt:1,retainBehindSeconds:1,loadGeneration:2,seekGeneration:3,destroyed:false,status:"playing",buffering:false,resumeAfterBuffer:false,raf:0});return {engine,audio,sources,callbacks};}
+  function harness(){const sources:any[]=[];const audio={currentTime:5,destination:{},resume:vi.fn(),suspend:vi.fn(),close:vi.fn(),createBufferSource:vi.fn(()=>{const node={buffer:undefined,connect:vi.fn(),start:vi.fn(),stop:vi.fn(),disconnect:vi.fn(),onended:null};sources.push(node);return node;})};const callbacks={status:vi.fn(),ready:vi.fn(),time:vi.fn(),error:vi.fn(),buffering:vi.fn(),timecode:vi.fn()};const engine=Object.create(PlayerEngine.prototype) as any;Object.assign(engine,{audio,sources,callbacks,renderer:{draw:vi.fn(),backend:"webgl"},mode:"streaming",streamingAudioSupported:true,audioChunks:[],scheduledAudio:[],audioExhausted:false,lastAudioTime:0,frames:[],durationValue:20,pausedAt:1,retainBehindSeconds:1,loadGeneration:2,seekGeneration:3,destroyed:false,status:"playing",playbackRateValue:1,buffering:false,resumeAfterBuffer:false,raf:0});return {engine,audio,sources,callbacks};}
   afterEach(()=>{vi.unstubAllGlobals();vi.restoreAllMocks();});
   it("appends only new chunks without stopping nodes or changing existing reservation times",()=>{const h=harness();h.engine.audioChunks=[chunk(1,2)];h.engine.resetAndScheduleStreamingAudio(1);const first=h.engine.scheduledAudio[0],firstTime=first.contextStartTime;h.engine.audioChunks.push(chunk(2,3));h.engine.appendStreamingAudioSchedule();expect(h.sources).toHaveLength(2);expect(first.sourceNode.stop).not.toHaveBeenCalled();expect(first.contextStartTime).toBe(firstTime);expect(h.engine.scheduledAudio[1].contextStartTime).toBeCloseTo(firstTime+1);h.engine.appendStreamingAudioSchedule();expect(h.sources).toHaveLength(2);});
   it("preserves real media gaps instead of packing chunks together",()=>{const h=harness();h.engine.audioChunks=[chunk(1,2),chunk(4,5)];h.engine.resetAndScheduleStreamingAudio(1);expect(h.engine.scheduledAudio[1].contextStartTime-h.engine.scheduledAudio[0].contextStartTime).toBeCloseTo(3);});
