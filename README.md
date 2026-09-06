@@ -17,16 +17,17 @@ edit unit、presentation time、所属Partition、および利用可能なIndex 
 `readEssenceRange()`は指定フレーム範囲だけを最大4 MiB単位で読み、Index Entryの
 KeyFrameOffset/RAPを優先して復号開始点を決めます。Index情報がない場合の既定prerollは45フレームです。
 
-PlayerEngine の実験的な `streaming` モードはこの索引と区間取得APIを使用します。
-既定の `legacy` は既存OP1a/XDCAM HD422との互換性を優先し、従来どおり全体を読み込みます。
+PlayerEngine の `streaming` モードはこの索引と区間取得APIを使用し、区間読み込みから区間デコードまで
+接続済みです。`legacy` は既存OP1a/XDCAM HD422との互換性を優先し、従来どおり全体を読み込んで
+全フレームをデコードします。API既定値は現在も `legacy` で、streaming を使うには明示指定が必要です。
 
 索引処理はEssence Valueを個別の`Uint8Array`として生成しないため、ピークメモリを抑えます。
 ただし`FileRandomAccessReader`は既定で1 MiB単位のアライン済みチャンクを読むため、KLV間隔が
 チャンクより短いファイルでは、ヘッダー走査だけでも物理I/Oがファイルの大部分に及ぶ可能性が
-あります。「常にファイル全体より少ないI/O」は保証しません。HTTP Range向けの小さなヘッダー
-キャッシュ／Reader設計とPlayerEngineの区間デコード接続は次段階の対象です。
+あります。「常にファイル全体より少ないI/O」は保証しません。PlayerEngineの区間デコード接続は
+実装済みです。HTTP Range向けの小さなヘッダーキャッシュ／Reader設計は引き続き次段階の対象です。
 
-React向けのブラウザ完結型 **MXF OP1a / MPEG-2 422P@HL** プレイヤーです。MPEG-2をWebCodecsへ渡さず、専用構成のlibav.js WebAssemblyでデコードし、yuv422pをRGBAへ変換してCanvas（WebGL）へ表示します。48 kHz / 24-bit PCMはplanar `Float32Array`へ変換してWeb Audio APIで再生します。
+React向けのブラウザ完結型 **MXF OP1a / MPEG-2 422P@HL** プレイヤーです。MPEG-2をWebCodecsへ渡さず、専用構成のlibav.js WebAssemblyでデコードしてCanvas（WebGL）へ表示します。描画は `videoRenderMode` で選べ、`yuv-webgl` はyuv422p平面をそのままGPUへ転送してシェーダーで変換し、`rgba` はCPUでRGBAへ変換します。48 kHz / 24-bit PCMはplanar `Float32Array`へ変換してWeb Audio APIで再生します。
 
 ## Windows 11（PowerShell）での起動
 
@@ -62,11 +63,25 @@ export default function Preview({ file }: { file: File }) {
 ```
 
 `mode` は `"legacy" | "streaming"` で、既定値は安全な `legacy` です。streaming では
-`readWhole()` を呼ばず、1回約3秒の区間を、キューが4秒先まで満たされるよう取得します。
-残量2秒未満で補充を開始し、表示済みから
-1秒より古いRGBAフレームを破棄し、seek時は旧要求をAbortしてseek先付近だけを再取得します。
+`readWhole()` を呼ばず、1回約3秒（`chunkSeconds`）の区間を取得してデコードします。先読み目標は
+既定6秒で、実測したデコード時間に応じて最大9秒まで自動的に伸び、さらに後述のバイト上限で
+頭打ちになります。残り時間が補充しきい値（既定4秒、これも実測に応じて伸びる）を切ると補充を開始し、
+再生位置から `retainBehindSeconds`（既定1秒）より古いフレームを破棄します。seek時は旧要求をAbortし、
+Worker側で未処理のデコードも破棄して、seek先付近だけを取得し直します。
+
+破棄と補充、および終端判定は `requestAnimationFrame` ではなく250 msの独立したタイマーで行います。
+タブが非表示になるとrAFは停止しますが、このタイマーは動き続けるため、非表示のままでもキューは
+際限なく伸びず、終端まで再生すれば `ended` が遅延なく通知されます。
 MXF先頭にSMPTEで許容される最大65,535 byteのRun-inがある場合も、Header Partitionを検出して部分読み込みを開始します。Timecode Trackは再生の必須条件ではなく、存在しない素材ではタイムコード表示とタイムコード指定ジャンプだけが無効になります。
 `ref.getDiagnostics()` と `onDiagnostics` からReader I/O、キャッシュ、キュー、世代を確認できます。
+
+### デコードの実行環境
+
+デコード、平面抽出、RGBA変換はすべて専用のWeb Worker（`video-decode-worker.ts`）で実行し、メインスレッドは描画とスケジューリングだけを担当します。libav.js自体は `noworker: true` で**このWorker内に直接**読み込みます。libav.jsに自前のWorkerを立てさせると、デコード済みフレームがWorker境界を2回越えることになり、実測で約1割のスループット低下になるためです。
+
+Workerへの要求は到着順に1件ずつ処理します。libavインスタンスは1つしかないため、デコード中に別のデコードやデコーダー解放が割り込むと、同じインスタンスに対して複数の要求が同時に走ります。直列化により「デコード完了 → invalidate完了 → 旧デコーダー解放完了 → 新デコーダー初期化」の順序を保証しています。seekなどでキュー内の未処理デコードが無効になった場合は、実行せずに破棄します。
+
+デコード済みフレームはWorkerからメインスレッドへ **transfer** で渡し（構造化複製をすると1チャンクで数百MBのコピーが発生します）、再生位置が通り過ぎたフレームのバッファは次のデコード要求に相乗りしてWorkerへ返却され、再利用プールに入ります。1080iの1フレームは約4.15 MBあるため、これがないと定常再生で毎秒100 MBを超えるゴミが発生します。プールの保持量は診断値 `pooledVideoFrames`、実行環境は `decoderExecution` で確認できます。
 
 ### 映像キューのメモリ上限
 
@@ -117,7 +132,7 @@ streaming音声はDescriptorが **48 kHz / 24-bit / 2 ch** でSound Essence pack
 - Index Edit Rate、Index Start Position、Index Duration、Edit Unit Byte Count
 - Index EntryのStream Offset、Key Frame Offset、Temporal Offset、Flags
 
-Stream OffsetはJavaScriptの安全な整数範囲に丸めず `bigint` で保持します。異なるMXF生成器がPrimer Packで動的Local Tagを割り当てるケースの完全対応、Codec/Pixel Format ULの網羅的な名称解決、Package参照を辿ったMaterial/Sourceの優先順位付けは今後の拡張対象です。解析できない値に1920×1080等の固定値を代入することはありません。一方、既存デコード経路は従来互換の対象形式に限り、libav codec ID、30000/1001 fps、48 kHz、2 chを引き続き利用します。このフォールバックは再生エンジンの区間デコード化まで既存素材を再生可能に保つための暫定措置です。
+Stream OffsetはJavaScriptの安全な整数範囲に丸めず `bigint` で保持します。異なるMXF生成器がPrimer Packで動的Local Tagを割り当てるケースの完全対応、Codec/Pixel Format ULの網羅的な名称解決、Package参照を辿ったMaterial/Sourceの優先順位付けは今後の拡張対象です。解析できない値に1920×1080等の固定値を代入することはありません。一方、既存デコード経路は従来互換の対象形式に限り、libav codec ID、30000/1001 fps、48 kHz、2 chを引き続き利用します。このフォールバックは、メタデータから確定できない値があっても既存素材を再生可能に保つための措置です。
 
 ## タイムコード表示
 
@@ -139,7 +154,9 @@ Preface、ContentStorage、MaterialPackage、SourcePackage、Track、Sequence、
 
 ## 読み込み・メモリ設計と段階的移行
 
-索引と`readEssenceRange()`はファイルサイズではなくKLV packet数と対象区間に比例します。最大単一readは4 MiB、キャッシュは64 MiB、Indexがない場合のprerollは45フレームです。PlayerEngineにはloadGeneration/AbortSignalに加えてseek専用AbortControllerと世代番号があり、古いseekの完了通知を抑止します。ただし現在の再生デコード互換経路は依然「ファイル全体を `ArrayBuffer` 化 → 全映像・音声デコード」で、長尺素材のピークメモリはまだ解消していません。
+索引と`readEssenceRange()`はファイルサイズではなくKLV packet数と対象区間に比例します。最大単一readは4 MiB、キャッシュは64 MiB、Indexがない場合のprerollは45フレームです。PlayerEngineにはloadGeneration/AbortSignalに加えてseek専用AbortControllerと世代番号があり、古いseekの完了通知を抑止します。
+
+`streaming` モードは区間読み込みと区間デコードが接続済みで、ファイル全体の `ArrayBuffer` 化も全尺デコードも行いません。ピークメモリを決めるのは入力サイズではなく、保持するデコード済みフレーム量です（上記のバイト上限を参照）。一方 `legacy` モードは互換経路として「ファイル全体を `ArrayBuffer` 化 → 全映像・音声デコード」を維持しており、長尺素材ではこちらのピークメモリは解消していません。
 
 Index Tableがない場合はBody Partition/KLVの既知位置、または先頭から順次走査する安全なフォールバックを使用します。未対応形式はDescriptor情報を含む理解可能なエラーにする予定ですが、現エンジンが受理する範囲は下記の既存形式に限られます。
 
@@ -149,7 +166,7 @@ Index Tableがない場合はBody Partition/KLVの既知位置、または先頭
 - 1920×1080、50 Mb/s、30000/1001 fps、top-field-first
 - PCM signed 24-bit / 48 kHz / 2 ch（MXFで一般的なBEと、テスト生成時のLE decoderをWASMへ収録）
 
-入力全体、RGBA化した全映像フレーム、全尺の音声をメモリに保持するため、現在は長尺素材の再生に負荷がかかります。部分読み込み・区間デコードは上記の後続段階で実装します。
+部分読み込みと区間デコードは `streaming` モードで実装済みです。`legacy` モードは入力全体、全映像フレーム、全尺の音声をメモリに保持するため、長尺素材では `streaming` を指定してください。
 
 ## ライセンスとソース提供
 

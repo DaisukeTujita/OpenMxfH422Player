@@ -350,7 +350,7 @@ describe("PlayerEngine streaming mode",()=>{
     h.engine.requestFill=vi.fn();h.engine.requestAudioFill=vi.fn();
     const tick=vi.spyOn(h.engine,"tick");
 
-    h.engine.scheduleRefillCheck();
+    h.engine.schedulePlaybackCheck();
     vi.advanceTimersByTime(250);
 
     expect(tick).not.toHaveBeenCalled();
@@ -376,6 +376,24 @@ describe("PlayerEngine streaming mode",()=>{
     // Staged buffers are handed over exactly once.
     expect(h.engine.takeRecyclableBuffers()).toEqual([]);
     expect(h.engine.getDiagnostics().pooledVideoFrames).toBe(7);
+  });
+
+  it("reaches ended from the playback timer, so a hidden tab is not stuck in playing",()=>{
+    vi.useFakeTimers();
+    vi.stubGlobal("requestAnimationFrame",vi.fn(()=>1));vi.stubGlobal("cancelAnimationFrame",vi.fn());vi.spyOn(performance,"now").mockReturnValue(20000);
+    const h=streamingPlaybackHarness();
+    h.engine.durationValue=10;h.engine.queuedThroughFrame=99;
+    h.engine.essenceIndex={frameRate:10,packets:[{kind:"video",editUnit:99}]};
+    h.engine.frames=[{frame:planarFrame(),time:9.9,mediaFrame:99}];
+    h.engine.requestFill=vi.fn();h.engine.requestAudioFill=vi.fn();
+    const tick=vi.spyOn(h.engine,"tick");
+
+    h.engine.schedulePlaybackCheck();
+    vi.advanceTimersByTime(250);
+
+    expect(tick).not.toHaveBeenCalled();
+    expect(h.engine.status).toBe("ended");
+    expect(h.callbacks.status).toHaveBeenLastCalledWith("ended");
   });
 
   it("enters buffering on exhaustion and freezes the media clock",()=>{
