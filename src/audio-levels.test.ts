@@ -67,7 +67,9 @@ describe("accumulateAudioLevels", () => {
     const levels = finalizeAudioLevels(accumulator, 0, 0.1);
 
     expect(levels.channels).toHaveLength(2);
-    expect(levels.channels.map(channel => channel.peak)).toEqual([0.1, 0.2]);
+    // Samples round-trip through Float32Array, so the peaks are the float32 neighbours of the literals.
+    expect(levels.channels[0].peak).toBeCloseTo(0.1, 6);
+    expect(levels.channels[1].peak).toBeCloseTo(0.2, 6);
   });
 
   it("ignores a buffer that cannot hand out samples rather than throwing at the meter", () => {
