@@ -38,7 +38,8 @@ export function toDecodeResult(wire: WireDecodeResult): DecodeResult {
   };
 }
 
-interface StreamingDecoderState { av: LibAV; codecId: number; ctx: number; pkt: number; frame: number; loadGeneration: number; seekGeneration: number; busy: boolean; disposeRequested: boolean; disposed: boolean }
+/** Requests are serialized by the Worker, so a decoder is never in use when it is freed; `disposed` only guards against freeing the same context twice. */
+interface StreamingDecoderState { av: LibAV; codecId: number; ctx: number; pkt: number; frame: number; loadGeneration: number; seekGeneration: number; disposed: boolean }
 
 export interface DecodeWorkerState { av?: LibAV; streaming?: StreamingDecoderState }
 
@@ -125,18 +126,20 @@ async function freeStreamingDecoder(decoder: StreamingDecoderState): Promise<voi
 
 function hasReusableStreamingDecoder(state: DecodeWorkerState, request: DecodeStreamingRequest): boolean {
   const decoder = state.streaming;
-  return Boolean(decoder && !decoder.disposed && !decoder.disposeRequested && decoder.loadGeneration === request.loadGeneration && decoder.seekGeneration === request.seekGeneration && decoder.codecId === request.codecId);
+  return Boolean(decoder && !decoder.disposed && decoder.loadGeneration === request.loadGeneration && decoder.seekGeneration === request.seekGeneration && decoder.codecId === request.codecId);
 }
 
 export async function decodeStreaming(state: DecodeWorkerState, request: DecodeStreamingRequest): Promise<WireDecodeResult> {
   const av = state.av!;
   if (!hasReusableStreamingDecoder(state, request)) {
-    if (state.streaming) invalidateStreaming(state);
+    // Free the superseded decoder before allocating its replacement, so two contexts never hold
+    // reference frames for the same stream at the same time.
+    await invalidateStreaming(state);
     const [, ctx, pkt, frame] = await av.ff_init_decoder(request.codecId);
-    state.streaming = { av, codecId: request.codecId, ctx, pkt, frame, loadGeneration: request.loadGeneration, seekGeneration: request.seekGeneration, busy: false, disposeRequested: false, disposed: false };
+    state.streaming = { av, codecId: request.codecId, ctx, pkt, frame, loadGeneration: request.loadGeneration, seekGeneration: request.seekGeneration, disposed: false };
   }
   const decoder = state.streaming!;
-  decoder.busy = true; let failure: unknown; let result: WireDecodeResult = { frames: [], decodeMs: 0, convertMs: 0 };
+  let failure: unknown; let result: WireDecodeResult = { frames: [], decodeMs: 0, convertMs: 0 };
   try {
     const rateScale = Number.isInteger(request.frameRate) ? 1 : 1001, rateDenominator = Math.round(request.frameRate * rateScale);
     const packets = request.chunks.map((data, i) => ({ data, pts: request.mediaFrames[i] ?? i, time_base_num: rateScale, time_base_den: rateDenominator }));
@@ -146,19 +149,19 @@ export async function decodeStreaming(state: DecodeWorkerState, request: DecodeS
     const { frames, convertMs } = buildFrames(decoded, av, request.mediaFrames, request.frameRate, request.videoRenderMode, { mode: "media-range", maxMediaFrame: request.maxMediaFrame });
     result = { frames, decodeMs, convertMs };
   } catch (error) {
-    failure = error; decoder.disposeRequested = true; if (state.streaming === decoder) state.streaming = undefined;
+    failure = error;
   }
-  if (request.flush) { decoder.disposeRequested = true; if (state.streaming === decoder) state.streaming = undefined; }
-  decoder.busy = false;
-  if (decoder.disposeRequested) try { await freeStreamingDecoder(decoder); } catch (error) { if (failure === undefined) failure = error; }
+  if (request.flush || failure !== undefined) {
+    if (state.streaming === decoder) state.streaming = undefined;
+    try { await freeStreamingDecoder(decoder); } catch (error) { if (failure === undefined) failure = error; }
+  }
   if (failure !== undefined) throw failure;
   return result;
 }
 
-export function invalidateStreaming(state: DecodeWorkerState): void {
-  const decoder = state.streaming; state.streaming = undefined; if (!decoder) return;
-  decoder.disposeRequested = true;
-  if (!decoder.busy) void freeStreamingDecoder(decoder).catch(error => console.warn("[H422Player] streaming decoder cleanup failed", error));
+export async function invalidateStreaming(state: DecodeWorkerState): Promise<void> {
+  const decoder = state.streaming; state.streaming = undefined;
+  if (decoder) await freeStreamingDecoder(decoder);
 }
 
 export type WorkerRequest =
@@ -173,7 +176,7 @@ export async function handleWorkerRequest(state: DecodeWorkerState, request: Wor
     case "init": await initDecoder(state, request.base); return undefined;
     case "decode-legacy": return decodeLegacy(state, request);
     case "decode-streaming": return decodeStreaming(state, request);
-    case "invalidate-streaming": invalidateStreaming(state); return undefined;
-    case "dispose": invalidateStreaming(state); state.av = undefined; return undefined;
+    case "invalidate-streaming": await invalidateStreaming(state); return undefined;
+    case "dispose": await invalidateStreaming(state); state.av = undefined; return undefined;
   }
 }

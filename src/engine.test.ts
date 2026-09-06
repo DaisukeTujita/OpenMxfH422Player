@@ -101,10 +101,24 @@ describe("PlayerEngine decodeVideo/decodeStreamingVideo delegate to the video de
   it("decodeStreamingVideo forwards to the client, updates the buffer estimate, and remembers the decoder generation", async () => {
     const client = fakeClient();
     const engine = Object.create(PlayerEngine.prototype) as any;
-    Object.assign(engine, { dependencies: { createVideoDecoder: () => client }, videoRenderMode: "yuv-webgl", videoCodecId: 2, durationValue: 10, videoDecodeMs: 0, videoColorConvertMs: 0, videoDecodedFrames: 0, adaptiveVideoAheadSeconds: 6, adaptiveRefillThresholdSeconds: 4, videoAheadSeconds: 6, refillThresholdSeconds: 4, chunkSeconds: 3 });
+    Object.assign(engine, { dependencies: { createVideoDecoder: () => client }, loadGeneration: 1, seekGeneration: 2, videoRenderMode: "yuv-webgl", videoCodecId: 2, durationValue: 10, videoDecodeMs: 0, videoColorConvertMs: 0, videoDecodedFrames: 0, adaptiveVideoAheadSeconds: 6, adaptiveRefillThresholdSeconds: 4, videoAheadSeconds: 6, refillThresholdSeconds: 4, chunkSeconds: 3 });
     await engine.decodeStreamingVideo([new Uint8Array([1])], [0], 30, false, 1, 2);
     expect(client.decodeStreamingVideo).toHaveBeenCalledWith([new Uint8Array([1])], [0], 30, false, 1, 2, 2, "yuv-webgl", 300);
     expect(engine.streamingDecoderGeneration).toEqual({ loadGeneration: 1, seekGeneration: 2 });
+  });
+
+  it("discards a decode that a seek superseded instead of letting it steer the buffer estimate", async () => {
+    const client = fakeClient();
+    const engine = Object.create(PlayerEngine.prototype) as any;
+    Object.assign(engine, { dependencies: { createVideoDecoder: () => client }, loadGeneration: 1, seekGeneration: 2, videoRenderMode: "yuv-webgl", videoCodecId: 2, durationValue: 10, videoDecodeMs: 0, videoColorConvertMs: 0, videoDecodedFrames: 0, adaptiveVideoAheadSeconds: 6, adaptiveRefillThresholdSeconds: 4, videoAheadSeconds: 6, refillThresholdSeconds: 4, chunkSeconds: 3, streamingDecoderGeneration: undefined });
+
+    // The seek that superseded this decode already bumped seekGeneration to 3.
+    engine.seekGeneration = 3;
+    await engine.decodeStreamingVideo([new Uint8Array([1])], [0], 30, false, 1, 2);
+
+    expect(engine.videoDecodeMs).toBe(0);
+    expect(engine.videoDecodedFrames).toBe(0);
+    expect(engine.streamingDecoderGeneration).toBeUndefined();
   });
 
   it("invalidateStreamingVideoDecoder forgets the decoder generation and notifies the client", () => {

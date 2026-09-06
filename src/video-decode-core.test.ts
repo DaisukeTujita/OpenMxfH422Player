@@ -122,18 +122,34 @@ describe("decodeStreaming decoder reuse", () => {
     expect(av.ff_free_decoder).toHaveBeenCalledOnce();
   });
 
-  it("defers disposal until an in-flight decode finishes", async () => {
-    let entered!: () => void, release!: () => void;
-    const started = new Promise<void>(resolve => { entered = resolve; }), wait = new Promise<void>(resolve => { release = resolve; });
-    const av: DecoderMock = { ff_init_decoder: vi.fn().mockResolvedValue([11, 22, 33, 44]), ff_decode_multi: vi.fn(async () => { entered(); await wait; return []; }), ff_free_decoder: vi.fn().mockResolvedValue(undefined) };
+  it("frees the superseded decoder before allocating its replacement", async () => {
+    const order: string[] = [];
+    const av: DecoderMock = {
+      AV_PIX_FMT_YUV422P: 4,
+      ff_init_decoder: vi.fn(async () => { order.push("init"); return [11, 22, 33, 44]; }),
+      ff_decode_multi: vi.fn(async () => []),
+      // A real ff_free_decoder settles on a later microtask; resolving synchronously would hide an unawaited free.
+      ff_free_decoder: vi.fn(async () => { await Promise.resolve(); order.push("free"); }),
+    };
     const state: DecodeWorkerState = { av: av as any };
-    const decoding = decodeStreaming(state, { codecId: 2, chunks: [new Uint8Array([1])], mediaFrames: [0], frameRate: 30, flush: false, loadGeneration: 1, seekGeneration: 2, videoRenderMode: "yuv-webgl", maxMediaFrame: 300 });
-    await started;
-    invalidateStreaming(state);
-    expect(av.ff_free_decoder).not.toHaveBeenCalled();
-    release();
-    await decoding;
-    expect(av.ff_free_decoder).toHaveBeenCalledOnce();
+    const request = { codecId: 2, chunks: [new Uint8Array([1])], mediaFrames: [0], frameRate: 30, flush: false, videoRenderMode: "yuv-webgl", maxMediaFrame: 300 } as const;
+
+    await decodeStreaming(state, { ...request, loadGeneration: 1, seekGeneration: 2 });
+    await decodeStreaming(state, { ...request, loadGeneration: 1, seekGeneration: 3 });
+
+    expect(order).toEqual(["init", "free", "init"]);
+  });
+
+  it("awaits the decoder free when invalidating", async () => {
+    let freed = false;
+    const av: DecoderMock = { AV_PIX_FMT_YUV422P: 4, ff_init_decoder: vi.fn().mockResolvedValue([11, 22, 33, 44]), ff_decode_multi: vi.fn().mockResolvedValue([]), ff_free_decoder: vi.fn(async () => { await Promise.resolve(); freed = true; }) };
+    const state: DecodeWorkerState = { av: av as any };
+    await decodeStreaming(state, { codecId: 2, chunks: [new Uint8Array([1])], mediaFrames: [0], frameRate: 30, flush: false, loadGeneration: 1, seekGeneration: 2, videoRenderMode: "yuv-webgl", maxMediaFrame: 300 });
+
+    await invalidateStreaming(state);
+
+    expect(freed).toBe(true);
+    expect(state.streaming).toBeUndefined();
   });
 
   it("keeps decoded YUV planes for direct WebGL rendering", async () => {

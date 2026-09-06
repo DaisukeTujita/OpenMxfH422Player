@@ -195,6 +195,9 @@ export class PlayerEngine {
   private async decodeStreamingVideo(chunks:Uint8Array[],mediaFrames:number[],frameRate:number,flush:boolean,loadGeneration:number,seekGeneration:number):Promise<RenderFrame[]> {
     const maxMediaFrame=Math.ceil(this.durationValue*frameRate);
     const result=await this.getVideoDecoder().decodeStreamingVideo(chunks,mediaFrames,frameRate,flush,loadGeneration,seekGeneration,this.videoCodecId,this.videoRenderMode,maxMediaFrame);
+    // A decode started before a seek still runs to completion; its frames are dropped by the caller,
+    // so its timings must not steer the adaptive buffer and its decoder must not be marked reusable.
+    if(loadGeneration!==this.loadGeneration||seekGeneration!==this.seekGeneration)return result.frames;
     this.videoDecodeMs+=result.decodeMs;this.videoColorConvertMs+=result.convertMs;this.videoDecodedFrames+=result.frames.length;
     this.adaptStreamingBuffer(result.decodeMs+result.convertMs,chunks.length,frameRate);
     this.streamingDecoderGeneration=flush?undefined:{loadGeneration,seekGeneration};
