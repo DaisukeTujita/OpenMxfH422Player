@@ -1,9 +1,23 @@
-name: Claude Code Issue Handler
-
+name: Claude Code
 on:
-  issues:
-    types: [opened, labeled]
-
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
 jobs:
-  claude-code:
-    if: contains(github.event.issue.labels.*.name, 'claude') || github.event.action == 'opened'
+  claude:
+    if: contains(github.event.comment.body, '@claude')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      id-token: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
