@@ -19,16 +19,19 @@ main { width: min(1040px, calc(100% - 32px)); margin: 0 auto; padding: 24px 0 80
 .viewer { display: grid; min-height: 420px; place-items: center; overflow: hidden; border: 1px solid #283142; border-radius: 14px 14px 0 0; background: #020304; }
 .viewer > div, .viewer canvas { width: 100%; }
 .empty-state { color: #6f7b8c; text-align: center; }
-.viewer-stage { position: relative; display: flex; align-items: stretch; gap: 10px; width: 100%; }
+.viewer-stage { position: relative; display: flex; align-items: stretch; width: 100%; }
 .player-surface { flex: 1 1 auto; min-width: 0; }
 .player-surface canvas { width: 100%; }
 .loading-overlay { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; gap: 12px; color: #e9eef7; background: rgba(2, 3, 4, .55); backdrop-filter: blur(1px); }
 .spinner { width: 28px; height: 28px; border: 3px solid rgba(233, 238, 247, .25); border-top-color: #65d6ad; border-radius: 50%; animation: spin 900ms linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 2400ms; } }
-.level-meters { display: flex; flex: 0 0 auto; gap: 8px; padding: 8px 8px 8px 0; }
-.level-meter { display: grid; grid-template-rows: minmax(80px, 1fr) auto auto; justify-items: center; gap: 4px; }
-.level-track { position: relative; width: 14px; height: 100%; overflow: hidden; border: 1px solid #3b475a; border-radius: 4px; background: #0b0e14; }
+/* Overlaid on the video's right edge rather than beside it, so it never grows the layout or
+   competes with the video for width. Sized to half the video's height and centred vertically;
+   pointer-events:none keeps it from intercepting clicks meant for the video underneath. */
+.level-meters { position: absolute; top: 50%; right: 10px; transform: translateY(-50%); height: 50%; display: flex; gap: 6px; padding: 6px 5px; border-radius: 8px; background: rgba(2, 3, 4, .45); backdrop-filter: blur(1px); pointer-events: none; z-index: 2; }
+.level-meter { display: grid; grid-template-rows: minmax(60px, 1fr) auto auto; justify-items: center; gap: 4px; }
+.level-track { position: relative; width: 12px; height: 100%; overflow: hidden; border: 1px solid #3b475a; border-radius: 4px; background: #0b0e14; }
 .level-fill { position: absolute; inset: auto 0 0 0; transition: height 80ms linear; }
 .level-peak { position: absolute; left: 0; right: 0; height: 2px; }
 .level-ok { background: #65d6ad; }
@@ -41,6 +44,7 @@ button.selected { border-color: #65d6ad; color: #07110e; background: #65d6ad; fo
 button { min-width: 96px; padding: 9px 14px; border: 1px solid #3b475a; border-radius: 8px; color: inherit; background: #1d2532; cursor: pointer; }
 button:hover:not(:disabled) { border-color: #65d6ad; }
 button:disabled { cursor: not-allowed; opacity: .4; }
+.meter-hint { margin: -4px 0 0; color: #9aa7b8; font-size: .82rem; }
 .seek-row { margin-top: 18px; color: #9aa7b8; font-variant-numeric: tabular-nums; }
 .seek-row input { flex: 1; accent-color: #65d6ad; }
 .timecode-row { display: flex; align-items: end; justify-content: space-between; gap: 24px; margin-bottom: 14px; }
