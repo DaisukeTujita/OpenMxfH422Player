@@ -208,7 +208,7 @@ export function App() {
           <div className="timecode-jump">
             <label htmlFor="timecode-input" className="control-label">ジャンプ先</label>
             <input id="timecode-input" aria-label="タイムコード" placeholder="10:00:00:00" value={timecodeInput} onChange={event=>{setTimecodeInput(event.target.value);setTimecodeError("");}} onKeyDown={event=>{if(event.key==="Enter")void jumpTimecode();}} />
-            <button type="button" disabled={!mediaInfo?.selectedTimecode} onClick={()=>void jumpTimecode()}>ジャンプ</button>
+            <button type="button" disabled={transportBusy || !mediaInfo?.selectedTimecode} onClick={()=>void jumpTimecode()}>ジャンプ</button>
           </div>
         </div>
         {timecodeError && <p className="timecode-error">{timecodeError}</p>}
@@ -216,7 +216,7 @@ export function App() {
           <button type="button" disabled={transportBusy || playerState === "playing"} onClick={() => void play()}>再生</button>
           <button type="button" disabled={playerState !== "playing"} onClick={() => playerRef.current?.pause()}>一時停止</button>
           <button type="button" disabled={transportBusy} onClick={() => void stop()}>停止</button>
-          <button type="button" aria-pressed={meterEnabled} onClick={() => setMeterEnabled(value => !value)}>
+          <button type="button" disabled={transportBusy} aria-pressed={meterEnabled} onClick={() => setMeterEnabled(value => !value)}>
             音声メーター {meterEnabled ? "ON" : "OFF"}
           </button>
         </div>
