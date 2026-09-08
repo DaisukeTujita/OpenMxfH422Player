@@ -27,4 +27,4 @@ jobs:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           claude_args: |
             --allowedTools "Bash(npm:*)"
-            --max-turns 75
+            --max-turns 100
