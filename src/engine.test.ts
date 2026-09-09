@@ -305,6 +305,190 @@ describe("PlayerEngine video queue byte ceiling", () => {
     expect(diagnostics.videoQueueMaxBytes).toBe(budget);
     expect(diagnostics.adaptiveVideoAheadSeconds).toBeCloseTo(110 / 30);
   });
+
+  it("tightens the look-ahead to the memory-adaptive ceiling when it is the smaller one", () => {
+    expect(engineWith({ memoryVideoAheadCeiling: 3 }).aheadSecondsTarget()).toBe(3);
+  });
+
+  it("tightens the byte budget to the memory-adaptive ceiling when it is the smaller one", () => {
+    // A 400 MB memory ceiling under an 800 MB host ceiling is 100 frames; minus the 90-frame chunk
+    // that a refill adds on top leaves 10 frames of look-ahead.
+    expect(engineWith({ memoryVideoQueueMaxBytesCeiling: 400 * 1024 * 1024 }).aheadSecondsTarget()).toBeCloseTo(10 / 30);
+  });
+
+  it("never lets memory pressure collapse the look-ahead below minVideoAheadSeconds, even when the shrunk byte ceiling could not otherwise cover it", () => {
+    // A memory ceiling of 4 MB (one frame) is far below even a single chunk, but the host's own
+    // 800 MB ceiling could easily cover a 2 s floor, so the floor - not the shrunk byte ceiling - wins.
+    expect(engineWith({ memoryVideoQueueMaxBytesCeiling: 4 * 1024 * 1024, minVideoAheadSeconds: 2 }).aheadSecondsTarget()).toBe(2);
+  });
+
+  it("still honours a genuinely tiny host-configured byte ceiling over the look-ahead floor", () => {
+    // Here the host itself, not memory pressure, set the tiny ceiling: the pre-existing "cannot even
+    // cover a chunk" behaviour must still win over a floor the host's own ceiling cannot support.
+    expect(engineWith({ videoQueueMaxBytes: 1024, memoryVideoQueueMaxBytesCeiling: 1024, minVideoAheadSeconds: 2 }).aheadSecondsTarget()).toBeCloseTo(1 / 30);
+  });
+
+  it("effectiveVideoQueueMaxBytes reports whichever ceiling is currently tighter", () => {
+    expect(engineWith({ memoryVideoQueueMaxBytesCeiling: 10 }).effectiveVideoQueueMaxBytes()).toBe(10);
+    expect(engineWith({ memoryVideoQueueMaxBytesCeiling: 10 * budget }).effectiveVideoQueueMaxBytes()).toBe(budget);
+  });
+});
+
+describe("PlayerEngine memory-adaptive buffer ceiling", () => {
+  function engineWith(overrides: Record<string, unknown> = {}) {
+    const engine = Object.create(PlayerEngine.prototype) as any;
+    Object.assign(engine, {
+      memoryAdaptiveBufferEnabled: true, memoryHighWaterRatio: 0.75, memoryLowWaterRatio: 0.55,
+      memoryShrinkFactor: 0.75, memoryGrowFactor: 1.2, minVideoAheadSeconds: 2, minVideoQueueMaxBytes: 100,
+      minRetainBehindSeconds: 0.25, videoAheadSeconds: 6, videoQueueMaxBytes: 1000, retainBehindSeconds: 1,
+      memoryVideoAheadCeiling: 6, memoryVideoQueueMaxBytesCeiling: 1000, memoryRetainBehindCeiling: 1,
+      memoryAdjustmentLog: [],
+      ...overrides,
+    });
+    return engine;
+  }
+  afterEach(() => { delete (performance as any).memory; });
+
+  it("getMemorySample returns undefined when performance.memory is unavailable", () => {
+    delete (performance as any).memory;
+    expect(engineWith().getMemorySample()).toBeUndefined();
+  });
+
+  it("getMemorySample reads the heap fields when performance.memory is available", () => {
+    (performance as any).memory = { usedJSHeapSize: 100, totalJSHeapSize: 150, jsHeapSizeLimit: 200 };
+    expect(engineWith().getMemorySample()).toEqual({ usedJSHeapSize: 100, totalJSHeapSize: 150, jsHeapSizeLimit: 200 });
+  });
+
+  it("shrinks every ceiling once usage reaches the high-water ratio, and logs the adjustment", () => {
+    (performance as any).memory = { usedJSHeapSize: 800, jsHeapSizeLimit: 1000 }; // 80% >= 75%
+    const engine = engineWith();
+    engine.checkMemoryPressure(false);
+    expect(engine.memoryVideoAheadCeiling).toBeCloseTo(6 * 0.75);
+    expect(engine.memoryVideoQueueMaxBytesCeiling).toBe(750);
+    expect(engine.memoryRetainBehindCeiling).toBeCloseTo(0.75);
+    expect(engine.memoryAdjustmentLog).toHaveLength(1);
+    expect(engine.memoryAdjustmentLog[0]).toMatchObject({ direction: "decreased", usedJSHeapSize: 800, jsHeapSizeLimit: 1000 });
+  });
+
+  it("never shrinks a ceiling past its configured floor", () => {
+    (performance as any).memory = { usedJSHeapSize: 999, jsHeapSizeLimit: 1000 };
+    const engine = engineWith({ minVideoAheadSeconds: 3, minVideoQueueMaxBytes: 700 });
+    for (let i = 0; i < 20; i++) engine.checkMemoryPressure(false);
+    expect(engine.memoryVideoAheadCeiling).toBe(3);
+    expect(engine.memoryVideoQueueMaxBytesCeiling).toBe(700);
+  });
+
+  it("grows every ceiling back once usage drops to the low-water ratio, and logs the adjustment", () => {
+    (performance as any).memory = { usedJSHeapSize: 400, jsHeapSizeLimit: 1000 }; // 40% <= 55%
+    const engine = engineWith({ memoryVideoAheadCeiling: 3, memoryVideoQueueMaxBytesCeiling: 500, memoryRetainBehindCeiling: 0.5 });
+    engine.checkMemoryPressure(false);
+    expect(engine.memoryVideoAheadCeiling).toBeCloseTo(3.6);
+    expect(engine.memoryVideoQueueMaxBytesCeiling).toBe(600);
+    expect(engine.memoryRetainBehindCeiling).toBeCloseTo(0.6);
+    expect(engine.memoryAdjustmentLog[0].direction).toBe("increased");
+  });
+
+  it("never grows a ceiling past the host-configured target", () => {
+    (performance as any).memory = { usedJSHeapSize: 100, jsHeapSizeLimit: 1000 };
+    const engine = engineWith({ memoryVideoAheadCeiling: 5.9 });
+    engine.checkMemoryPressure(false);
+    expect(engine.memoryVideoAheadCeiling).toBe(6);
+  });
+
+  it("holds every ceiling steady between the low- and high-water ratios", () => {
+    (performance as any).memory = { usedJSHeapSize: 650, jsHeapSizeLimit: 1000 }; // 65%, between 55% and 75%
+    const engine = engineWith();
+    engine.checkMemoryPressure(false);
+    expect(engine.memoryVideoAheadCeiling).toBe(6);
+    expect(engine.memoryAdjustmentLog).toHaveLength(0);
+  });
+
+  it("does nothing while disabled, or while performance.memory is unavailable", () => {
+    delete (performance as any).memory;
+    const unavailable = engineWith();
+    unavailable.checkMemoryPressure(false);
+    expect(unavailable.memoryVideoAheadCeiling).toBe(6);
+    (performance as any).memory = { usedJSHeapSize: 999, jsHeapSizeLimit: 1000 };
+    const disabled = engineWith({ memoryAdaptiveBufferEnabled: false });
+    disabled.checkMemoryPressure(false);
+    expect(disabled.memoryVideoAheadCeiling).toBe(6);
+  });
+
+  it("effectiveRetainBehindSeconds shrinks first under memory pressure and never exceeds the host target", () => {
+    expect(engineWith({ memoryRetainBehindCeiling: 0.4 }).effectiveRetainBehindSeconds()).toBeCloseTo(0.4);
+    expect(engineWith({ memoryRetainBehindCeiling: 5 }).effectiveRetainBehindSeconds()).toBe(1);
+  });
+
+  it("evictPlayedMedia evicts using the memory-tightened retain window", () => {
+    const frames = [{ frame: planarFrame(), time: 0 }, { frame: planarFrame(), time: 4.5 }, { frame: planarFrame(), time: 5 }];
+    const engine = engineWith({ frames, mode: "streaming", memoryRetainBehindCeiling: 0.4, audioChunks: [], scheduledAudio: [] });
+    engine.evictPlayedMedia(5);
+    expect(engine.frames.map((f: any) => f.time)).toEqual([5]);
+  });
+});
+
+describe("PlayerEngine buffering counters", () => {
+  function harness() {
+    const engine = Object.create(PlayerEngine.prototype) as any;
+    Object.assign(engine, { callbacks: {}, buffering: false, bufferingEventCount: 0, bufferingTotalMs: 0, status: "playing", seeking: false });
+    return engine;
+  }
+  afterEach(() => vi.restoreAllMocks());
+
+  it("counts buffering episodes and accumulates their total duration", () => {
+    const engine = harness();
+    const now = vi.spyOn(performance, "now");
+    now.mockReturnValueOnce(1000); engine.setBuffering(true);
+    now.mockReturnValueOnce(1500); engine.setBuffering(false);
+    now.mockReturnValueOnce(2500); engine.setBuffering(true);
+    now.mockReturnValueOnce(3000); engine.setBuffering(false);
+    expect(engine.bufferingEventCount).toBe(2);
+    expect(engine.bufferingTotalMs).toBe(1000);
+  });
+
+  it("ignores a call that repeats the current value", () => {
+    const engine = harness();
+    engine.setBuffering(false);
+    expect(engine.bufferingEventCount).toBe(0);
+    expect(engine.bufferingTotalMs).toBe(0);
+  });
+
+  it("getDiagnostics reports memory readings, the adjustment log, and the buffering counters", () => {
+    const engine = Object.create(PlayerEngine.prototype) as any;
+    Object.assign(engine, {
+      frames: [], mode: "streaming", videoRenderMode: "yuv-webgl", renderer: { draw: vi.fn(), backend: "webgl" },
+      audioChunks: [], scheduledAudio: [], frameBytes: 0, videoQueueMaxBytes: 1000, memoryVideoQueueMaxBytesCeiling: 600,
+      lastMemorySample: { usedJSHeapSize: 300, totalJSHeapSize: 400, jsHeapSizeLimit: 1000 }, memoryApiAvailable: true,
+      memoryAdjustmentLog: [{ atMs: 1, direction: "decreased", videoAheadSeconds: 3, videoQueueMaxBytes: 600, retainBehindSeconds: 0.5, usedJSHeapSize: 750, jsHeapSizeLimit: 1000 }],
+      bufferingEventCount: 2, bufferingTotalMs: 1500,
+    });
+    const diagnostics = engine.getDiagnostics();
+    expect(diagnostics.adaptiveVideoQueueMaxBytes).toBe(600);
+    expect(diagnostics.memoryApiAvailable).toBe(true);
+    expect(diagnostics.jsHeapUsedBytes).toBe(300);
+    expect(diagnostics.jsHeapLimitBytes).toBe(1000);
+    expect(diagnostics.jsHeapAvailableBytes).toBe(700);
+    expect(diagnostics.memoryBufferAdjustmentCount).toBe(1);
+    expect(diagnostics.memoryBufferAdjustments).toHaveLength(1);
+    expect(diagnostics.bufferingEventCount).toBe(2);
+    expect(diagnostics.bufferingTotalMs).toBe(1500);
+  });
+
+  it("getDiagnostics reports memoryApiAvailable false and null heap readings when the API never resolved a sample", () => {
+    const engine = Object.create(PlayerEngine.prototype) as any;
+    Object.assign(engine, {
+      frames: [], mode: "streaming", videoRenderMode: "yuv-webgl", renderer: { draw: vi.fn(), backend: "webgl" },
+      audioChunks: [], scheduledAudio: [], frameBytes: 0, videoQueueMaxBytes: 1000, memoryApiAvailable: false,
+    });
+    const diagnostics = engine.getDiagnostics();
+    expect(diagnostics.memoryApiAvailable).toBe(false);
+    expect(diagnostics.jsHeapUsedBytes).toBeNull();
+    expect(diagnostics.jsHeapLimitBytes).toBeNull();
+    expect(diagnostics.jsHeapAvailableBytes).toBeNull();
+    expect(diagnostics.memoryBufferAdjustmentCount).toBe(0);
+    expect(diagnostics.bufferingEventCount).toBe(0);
+    expect(diagnostics.bufferingTotalMs).toBe(0);
+  });
 });
 
 describe("PlayerEngine decodeVideo/decodeStreamingVideo delegate to the video decoder client", () => {

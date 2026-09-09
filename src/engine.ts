@@ -4,7 +4,7 @@ import { FileRandomAccessReader, type RandomAccessReader } from "./random-access
 import { pcmS24beToFloat32, XDCAM_FRAME_RATE } from "./media";
 import { timecodeAtSeconds, timecodeToMediaFrame, type MxfTimecodeInfo } from "./timecode";
 import { findSeekPoint, mergeIndexTables } from "./mxf-index";
-import type { AudioLevels, FrameSelection, PlaybackRateChangeInfo, PlayerInfo, PlayerState, PlayerStatus } from "./types";
+import type { AudioLevels, FrameSelection, MemoryBufferAdjustment, PlaybackRateChangeInfo, PlayerInfo, PlayerState, PlayerStatus } from "./types";
 import { derivePlayerState } from "./player-state";
 import { accumulateAudioLevels, createAudioLevelAccumulator, DEFAULT_AUDIO_LEVEL_INTERVAL_MS, finalizeAudioLevels, silentAudioLevels, type AudioLevelBufferLike } from "./audio-levels";
 import { createFrameRenderer, type FrameRenderer, type Yuv422Frame } from "./webgl";
@@ -72,7 +72,61 @@ export const DEFAULT_FULL_DECODE_MAX_RATE = 1.5;
  */
 const IN_PLACE_DECIMATION_MIN_SECONDS = 0.5;
 
-export interface PlayerEngineOptions { mode?: PlaybackMode; videoRenderMode?:VideoRenderMode; videoAheadSeconds?:number; retainBehindSeconds?:number; refillThresholdSeconds?:number; chunkSeconds?:number; maxReadSize?:number; videoQueueMaxBytes?:number; fullDecodeMaxRate?:number; enableAudioLevels?:boolean; audioLevelIntervalMs?:number }
+/**
+ * `navigator.deviceMemory` rounds every machine at 8 GB and above to "8", so it cannot tell an 8 GB
+ * machine already under memory pressure from a well-provisioned one, and it is read once at startup
+ * rather than tracking pressure that builds up afterward. Measured on a 5-year-old 8 GB Windows
+ * machine: the browser tab alone sat at ~80% of its heap limit before any file was even chosen, and
+ * ~90% once one was loaded — a static, unmeasurable guess made once at load time cannot see that.
+ * Polling `performance.memory` (Chrome/Edge only) instead reacts to the real, changing constraint.
+ */
+export const DEFAULT_MEMORY_CHECK_INTERVAL_MS = 3000;
+/** Above this fraction of `jsHeapSizeLimit` used, every memory-adaptive ceiling shrinks one step. */
+export const DEFAULT_MEMORY_HIGH_WATER_RATIO = 0.75;
+/** Below this fraction used, every memory-adaptive ceiling grows one step back toward its target. */
+export const DEFAULT_MEMORY_LOW_WATER_RATIO = 0.55;
+/** Multiplier applied to a ceiling once per check while usage stays at or above the high-water ratio. */
+export const DEFAULT_MEMORY_SHRINK_FACTOR = 0.75;
+/** Multiplier applied to a ceiling once per check while usage stays at or below the low-water ratio. */
+export const DEFAULT_MEMORY_GROW_FACTOR = 1.2;
+/** The look-ahead is never shrunk past this: below it a refill can no longer outlast a chunk decode. */
+export const DEFAULT_MIN_VIDEO_AHEAD_SECONDS = 2;
+/** The byte ceiling is never shrunk past this. */
+export const DEFAULT_MIN_VIDEO_QUEUE_MAX_BYTES = 192 * 1024 * 1024;
+/** The behind-playhead retention is never shrunk past this. */
+export const DEFAULT_MIN_RETAIN_BEHIND_SECONDS = 0.25;
+/**
+ * Ceiling used in place of `videoAheadSeconds`/`videoQueueMaxBytes` when `performance.memory` is not
+ * available (Firefox, Safari) and pressure therefore cannot be measured at all: a fixed conservative
+ * target rather than assuming the full, decode-speed-tuned default fits an unmeasured machine.
+ */
+export const DEFAULT_FALLBACK_VIDEO_AHEAD_SECONDS = 4;
+export const DEFAULT_FALLBACK_VIDEO_QUEUE_MAX_BYTES = 512 * 1024 * 1024;
+
+export interface PlayerEngineOptions { mode?: PlaybackMode; videoRenderMode?:VideoRenderMode; videoAheadSeconds?:number; retainBehindSeconds?:number; refillThresholdSeconds?:number; chunkSeconds?:number; maxReadSize?:number; videoQueueMaxBytes?:number; fullDecodeMaxRate?:number; enableAudioLevels?:boolean; audioLevelIntervalMs?:number;
+  /** Turns the memory-adaptive buffer target on or off. Enabled by default. */
+  enableMemoryAdaptiveBuffer?:boolean;
+  /** How often `performance.memory` is polled while enabled and available, in milliseconds. */
+  memoryCheckIntervalMs?:number;
+  /** Used/limit ratio at or above which the buffer target shrinks. */
+  memoryHighWaterRatio?:number;
+  /** Used/limit ratio at or below which the buffer target grows back. */
+  memoryLowWaterRatio?:number;
+  /** Per-check multiplier while shrinking. */
+  memoryShrinkFactor?:number;
+  /** Per-check multiplier while growing back. */
+  memoryGrowFactor?:number;
+  /** Floor the look-ahead target is never shrunk past. */
+  minVideoAheadSeconds?:number;
+  /** Floor the byte ceiling is never shrunk past. */
+  minVideoQueueMaxBytes?:number;
+  /** Floor the behind-playhead retention is never shrunk past. */
+  minRetainBehindSeconds?:number;
+  /** Ceiling used instead of `videoAheadSeconds` when `performance.memory` is unavailable. */
+  fallbackVideoAheadSeconds?:number;
+  /** Ceiling used instead of `videoQueueMaxBytes` when `performance.memory` is unavailable. */
+  fallbackVideoQueueMaxBytes?:number;
+}
 
 type TimecodeLogger = Pick<Console, "debug" | "info" | "warn">;
 
@@ -116,13 +170,26 @@ export class PlayerEngine {
   private readonly videoAheadSeconds:number; private readonly retainBehindSeconds:number; private readonly refillThresholdSeconds:number; private readonly chunkSeconds:number; private readonly maxReadSize:number; private readonly videoQueueMaxBytes:number; private readonly fullDecodeMaxRate:number;
   private frameBytes=0;
   private adaptiveVideoAheadSeconds:number; private adaptiveRefillThresholdSeconds:number; private lastChunkDecodeMs=0;
+  private readonly memoryAdaptiveBufferEnabled:boolean; private readonly memoryCheckIntervalMs:number; private readonly memoryHighWaterRatio:number; private readonly memoryLowWaterRatio:number; private readonly memoryShrinkFactor:number; private readonly memoryGrowFactor:number;
+  private readonly minVideoAheadSeconds:number; private readonly minVideoQueueMaxBytes:number; private readonly minRetainBehindSeconds:number; private readonly fallbackVideoAheadSeconds:number; private readonly fallbackVideoQueueMaxBytes:number;
+  private memoryApiAvailable=false; private memoryVideoAheadCeiling=Infinity; private memoryVideoQueueMaxBytesCeiling=Infinity; private memoryRetainBehindCeiling=Infinity; private memoryCheckTimer?:number;
+  private lastMemorySample?:{usedJSHeapSize:number;totalJSHeapSize:number;jsHeapSizeLimit:number}; private memoryAdjustmentLog:MemoryBufferAdjustment[]=[];
+  private bufferingEventCount=0; private bufferingTotalMs=0; private bufferingStartedAtMs?:number;
   private readonly dependencies: PlayerEngineDependencies;
   constructor(canvas: HTMLCanvasElement, private callbacks: Callbacks, private muted=false, private libavBase="/libav", dependencies: Partial<PlayerEngineDependencies>={}, options:PlayerEngineOptions={}) { this.dependencies={...defaultDependencies,...dependencies};this.renderer=createFrameRenderer(canvas);this.mode=options.mode??"legacy";
     // Planar YUV has no path on a 2D canvas, so a WebGL fallback also forces CPU colour conversion.
     this.videoRenderMode=this.renderer.backend==="canvas2d"?"rgba":(options.videoRenderMode??"yuv-webgl");this.videoAheadSeconds=options.videoAheadSeconds??6;this.retainBehindSeconds=options.retainBehindSeconds??1;this.refillThresholdSeconds=options.refillThresholdSeconds??4;this.adaptiveVideoAheadSeconds=this.videoAheadSeconds;this.adaptiveRefillThresholdSeconds=this.refillThresholdSeconds;this.chunkSeconds=options.chunkSeconds??3;this.maxReadSize=options.maxReadSize??4*1024*1024;this.videoQueueMaxBytes=options.videoQueueMaxBytes??DEFAULT_VIDEO_QUEUE_MAX_BYTES;this.fullDecodeMaxRate=options.fullDecodeMaxRate??DEFAULT_FULL_DECODE_MAX_RATE;
     // A meter cannot resolve faster than it is sampled, and a sub-frame interval would sample the
     // same window twice, so the floor is one video frame rather than an arbitrary small number.
-    this.audioLevelIntervalMs=Math.max(1000/XDCAM_FRAME_RATE,options.audioLevelIntervalMs??DEFAULT_AUDIO_LEVEL_INTERVAL_MS);this.audioLevelsOn=options.enableAudioLevels??false;if(this.audioLevelsOn)this.startAudioLevelSampling(); }
+    this.audioLevelIntervalMs=Math.max(1000/XDCAM_FRAME_RATE,options.audioLevelIntervalMs??DEFAULT_AUDIO_LEVEL_INTERVAL_MS);this.audioLevelsOn=options.enableAudioLevels??false;if(this.audioLevelsOn)this.startAudioLevelSampling();
+    this.memoryAdaptiveBufferEnabled=options.enableMemoryAdaptiveBuffer??true;this.memoryCheckIntervalMs=options.memoryCheckIntervalMs??DEFAULT_MEMORY_CHECK_INTERVAL_MS;this.memoryHighWaterRatio=options.memoryHighWaterRatio??DEFAULT_MEMORY_HIGH_WATER_RATIO;this.memoryLowWaterRatio=options.memoryLowWaterRatio??DEFAULT_MEMORY_LOW_WATER_RATIO;this.memoryShrinkFactor=options.memoryShrinkFactor??DEFAULT_MEMORY_SHRINK_FACTOR;this.memoryGrowFactor=options.memoryGrowFactor??DEFAULT_MEMORY_GROW_FACTOR;
+    this.minVideoAheadSeconds=options.minVideoAheadSeconds??DEFAULT_MIN_VIDEO_AHEAD_SECONDS;this.minVideoQueueMaxBytes=options.minVideoQueueMaxBytes??DEFAULT_MIN_VIDEO_QUEUE_MAX_BYTES;this.minRetainBehindSeconds=options.minRetainBehindSeconds??DEFAULT_MIN_RETAIN_BEHIND_SECONDS;this.fallbackVideoAheadSeconds=options.fallbackVideoAheadSeconds??DEFAULT_FALLBACK_VIDEO_AHEAD_SECONDS;this.fallbackVideoQueueMaxBytes=options.fallbackVideoQueueMaxBytes??DEFAULT_FALLBACK_VIDEO_QUEUE_MAX_BYTES;
+    this.lastMemorySample=this.getMemorySample();this.memoryApiAvailable=Boolean(this.lastMemorySample);
+    this.memoryVideoAheadCeiling=this.memoryApiAvailable?this.videoAheadSeconds:Math.min(this.videoAheadSeconds,this.fallbackVideoAheadSeconds);
+    this.memoryVideoQueueMaxBytesCeiling=this.memoryApiAvailable?this.videoQueueMaxBytes:Math.min(this.videoQueueMaxBytes,this.fallbackVideoQueueMaxBytes);
+    this.memoryRetainBehindCeiling=this.retainBehindSeconds;
+    if(this.memoryAdaptiveBufferEnabled&&this.memoryApiAvailable)this.startMemoryMonitor();
+  }
   get currentTime(): number {
     if (this.status !== "playing") return this.pausedAt;
     const elapsed=(performance.now()-this.playAnchorWall)/1000*this.playbackRateValue;
@@ -151,7 +218,7 @@ export class PlayerEngine {
     this.callbacks?.playbackRate?.(info.rate,info);
   }
   private drawFrame(frame:ImageData|Yuv422Frame):void { const started=performance.now();this.renderer.draw(frame,frame.width,frame.height);this.videoUploadMs+=(performance.now()-started); }
-  getDiagnostics():PlayerDiagnostics { const stats=(this.reader as any)?.getStats?.()??{};const active=this.audio&&this.scheduledAudio.find(range=>range.contextStartTime<=this.audio!.currentTime&&range.contextStartTime+(range.mediaEndTime-range.mediaStartTime)/(this.audioPlaybackRate()||1)>=this.audio!.currentTime);const audioTime=active&&this.audio?active.mediaStartTime+(this.audio.currentTime-active.contextStartTime)*(this.audioPlaybackRate()||1):null;return {mode:this.mode,videoRenderMode:this.videoRenderMode,fileSize:this.fileSize,bytesLoaded:Number(stats.bytesLoaded??0),underlyingReadCount:stats.underlyingReadCount??0,cacheBytes:stats.cachedBytes??0,videoQueueFrames:this.frames.length,videoQueueStart:this.frames[0]?.time??null,videoQueueEnd:this.frames.at(-1)?.time??null,scheduledAudioRanges:this.mode==="streaming"?this.scheduledAudio.length:(this.audioSource?1:0),loadGeneration:this.loadGeneration,seekGeneration:this.seekGeneration,streamingAudioSupported:this.streamingAudioSupported,selectedAudioTrackNumber:this.selectedAudioTrackNumber??null,audioSampleRate:this.audioSampleRate??null,audioChannels:this.audioChannels??null,audioQueueStart:this.audioChunks?.[0]?.mediaStartTime??null,audioQueueEnd:this.audioChunks?.at(-1)?.mediaEndTime??null,audioVideoDriftMs:audioTime===null?null:(audioTime-this.currentTime)*1000,audioBytesLoaded:this.audioBytesLoaded,audioQueuedThroughTime:this.audioQueuedThroughTime,audioExhausted:this.audioExhausted,lastPlayableAudioTime:this.streamingAudioSupported?this.lastAudioTime:null,audioFormatBasis:this.audioFormatBasis,requestedTimecode:this.requestedTimecode,requestedFrame:this.requestedFrame,actualDisplayedFrame:this.actualDisplayedFrame,seekStartFrame:this.seekStartFrame,prerollFrames:this.prerollFrames,seekSource:this.seekSource,seekReadBytes:this.seekReadBytes,seekElapsedMs:this.seekElapsedMs,selectedTimecodeTrack:this.timecodeInfo?"unresolved":null,timecodeSelectionReason:this.timecodeSelectionReason,videoDecodedFrames:this.videoDecodedFrames,videoDecodeMs:this.videoDecodeMs,videoColorConvertMs:this.videoColorConvertMs,videoUploadMs:this.videoUploadMs,decoderExecution:"dedicated-worker",rendererBackend:this.renderer.backend,playbackRate:this.playbackRateValue??1,frameSelection:this.frameSelection(),audioPlaybackRate:this.audioPlaybackRate(),adaptiveVideoAheadSeconds:this.aheadSecondsTarget(),adaptiveRefillThresholdSeconds:this.refillThresholdTarget(),videoQueueBytes:this.videoQueueBytes(),videoQueueMaxBytes:this.videoQueueMaxBytes,lastChunkDecodeMs:this.lastChunkDecodeMs??0,pooledVideoFrames:this.pooledVideoFrames??0}; }
+  getDiagnostics():PlayerDiagnostics { const stats=(this.reader as any)?.getStats?.()??{};const active=this.audio&&this.scheduledAudio.find(range=>range.contextStartTime<=this.audio!.currentTime&&range.contextStartTime+(range.mediaEndTime-range.mediaStartTime)/(this.audioPlaybackRate()||1)>=this.audio!.currentTime);const audioTime=active&&this.audio?active.mediaStartTime+(this.audio.currentTime-active.contextStartTime)*(this.audioPlaybackRate()||1):null;return {mode:this.mode,videoRenderMode:this.videoRenderMode,fileSize:this.fileSize,bytesLoaded:Number(stats.bytesLoaded??0),underlyingReadCount:stats.underlyingReadCount??0,cacheBytes:stats.cachedBytes??0,videoQueueFrames:this.frames.length,videoQueueStart:this.frames[0]?.time??null,videoQueueEnd:this.frames.at(-1)?.time??null,scheduledAudioRanges:this.mode==="streaming"?this.scheduledAudio.length:(this.audioSource?1:0),loadGeneration:this.loadGeneration,seekGeneration:this.seekGeneration,streamingAudioSupported:this.streamingAudioSupported,selectedAudioTrackNumber:this.selectedAudioTrackNumber??null,audioSampleRate:this.audioSampleRate??null,audioChannels:this.audioChannels??null,audioQueueStart:this.audioChunks?.[0]?.mediaStartTime??null,audioQueueEnd:this.audioChunks?.at(-1)?.mediaEndTime??null,audioVideoDriftMs:audioTime===null?null:(audioTime-this.currentTime)*1000,audioBytesLoaded:this.audioBytesLoaded,audioQueuedThroughTime:this.audioQueuedThroughTime,audioExhausted:this.audioExhausted,lastPlayableAudioTime:this.streamingAudioSupported?this.lastAudioTime:null,audioFormatBasis:this.audioFormatBasis,requestedTimecode:this.requestedTimecode,requestedFrame:this.requestedFrame,actualDisplayedFrame:this.actualDisplayedFrame,seekStartFrame:this.seekStartFrame,prerollFrames:this.prerollFrames,seekSource:this.seekSource,seekReadBytes:this.seekReadBytes,seekElapsedMs:this.seekElapsedMs,selectedTimecodeTrack:this.timecodeInfo?"unresolved":null,timecodeSelectionReason:this.timecodeSelectionReason,videoDecodedFrames:this.videoDecodedFrames,videoDecodeMs:this.videoDecodeMs,videoColorConvertMs:this.videoColorConvertMs,videoUploadMs:this.videoUploadMs,decoderExecution:"dedicated-worker",rendererBackend:this.renderer.backend,playbackRate:this.playbackRateValue??1,frameSelection:this.frameSelection(),audioPlaybackRate:this.audioPlaybackRate(),adaptiveVideoAheadSeconds:this.aheadSecondsTarget(),adaptiveRefillThresholdSeconds:this.refillThresholdTarget(),adaptiveRetainBehindSeconds:this.effectiveRetainBehindSeconds(),videoQueueBytes:this.videoQueueBytes(),videoQueueMaxBytes:this.videoQueueMaxBytes,adaptiveVideoQueueMaxBytes:this.effectiveVideoQueueMaxBytes(),lastChunkDecodeMs:this.lastChunkDecodeMs??0,pooledVideoFrames:this.pooledVideoFrames??0,memoryApiAvailable:this.memoryApiAvailable,jsHeapUsedBytes:this.lastMemorySample?.usedJSHeapSize??null,jsHeapLimitBytes:this.lastMemorySample?.jsHeapSizeLimit??null,jsHeapAvailableBytes:this.lastMemorySample?Math.max(0,this.lastMemorySample.jsHeapSizeLimit-this.lastMemorySample.usedJSHeapSize):null,memoryBufferAdjustmentCount:(this.memoryAdjustmentLog??[]).length,memoryBufferAdjustments:this.memoryAdjustmentLog??[],bufferingEventCount:this.bufferingEventCount??0,bufferingTotalMs:Math.round((this.bufferingTotalMs??0)+(this.bufferingStartedAtMs!==undefined?performance.now()-this.bufferingStartedAtMs:0))}; }
   private publishDiagnostics(){this.callbacks.diagnostics?.(this.getDiagnostics());}
   get audioLevelsEnabled():boolean { return this.audioLevelsOn; }
   /**
@@ -207,6 +274,55 @@ export class PlayerEngine {
     }
     return accumulator.samples?finalizeAudioLevels(accumulator,time,windowSeconds):silentAudioLevels(time,windowSeconds);
   }
+  /** Undefined on Firefox/Safari, or if a future spec change drops the fields this reads. */
+  private getMemorySample():{usedJSHeapSize:number;totalJSHeapSize:number;jsHeapSizeLimit:number}|undefined {
+    const mem=(performance as unknown as {memory?:{usedJSHeapSize?:number;totalJSHeapSize?:number;jsHeapSizeLimit?:number}}).memory;
+    if(!mem||typeof mem.usedJSHeapSize!=="number"||typeof mem.jsHeapSizeLimit!=="number")return undefined;
+    return {usedJSHeapSize:mem.usedJSHeapSize,totalJSHeapSize:mem.totalJSHeapSize??mem.usedJSHeapSize,jsHeapSizeLimit:mem.jsHeapSizeLimit};
+  }
+  private startMemoryMonitor():void {
+    if(this.memoryCheckTimer!==undefined||this.destroyed)return;
+    this.memoryCheckTimer=setInterval(()=>this.checkMemoryPressure(),this.memoryCheckIntervalMs) as unknown as number;
+  }
+  private stopMemoryMonitor():void {
+    if(this.memoryCheckTimer===undefined)return;
+    clearInterval(this.memoryCheckTimer);this.memoryCheckTimer=undefined;
+  }
+  /**
+   * One step of hysteresis toward whichever side the used/heap ratio sits on: shrink every ceiling
+   * while usage stays at or above the high-water ratio, grow every ceiling back toward its configured
+   * target while it stays at or below the low-water ratio, and hold between the two so a ratio that
+   * hovers near one threshold does not oscillate the buffer every check. `publish` is false for the
+   * check `load()` runs before the initial fill, whose own diagnostics publish follows shortly after.
+   */
+  private checkMemoryPressure(publish=true):void {
+    if(!this.memoryAdaptiveBufferEnabled)return;
+    const sample=this.getMemorySample();
+    if(!sample)return;
+    this.lastMemorySample=sample;
+    const usedRatio=sample.jsHeapSizeLimit>0?sample.usedJSHeapSize/sample.jsHeapSizeLimit:0;
+    const previousAhead=this.memoryVideoAheadCeiling,previousBytes=this.memoryVideoQueueMaxBytesCeiling,previousRetain=this.memoryRetainBehindCeiling;
+    if(usedRatio>=this.memoryHighWaterRatio){
+      this.memoryVideoAheadCeiling=Math.max(this.minVideoAheadSeconds,this.memoryVideoAheadCeiling*this.memoryShrinkFactor);
+      this.memoryVideoQueueMaxBytesCeiling=Math.max(this.minVideoQueueMaxBytes,Math.round(this.memoryVideoQueueMaxBytesCeiling*this.memoryShrinkFactor));
+      this.memoryRetainBehindCeiling=Math.max(this.minRetainBehindSeconds,this.memoryRetainBehindCeiling*this.memoryShrinkFactor);
+    } else if(usedRatio<=this.memoryLowWaterRatio){
+      this.memoryVideoAheadCeiling=Math.min(this.videoAheadSeconds,this.memoryVideoAheadCeiling*this.memoryGrowFactor);
+      this.memoryVideoQueueMaxBytesCeiling=Math.min(this.videoQueueMaxBytes,Math.round(this.memoryVideoQueueMaxBytesCeiling*this.memoryGrowFactor));
+      this.memoryRetainBehindCeiling=Math.min(this.retainBehindSeconds,this.memoryRetainBehindCeiling*this.memoryGrowFactor);
+    }
+    const changed=previousAhead!==this.memoryVideoAheadCeiling||previousBytes!==this.memoryVideoQueueMaxBytesCeiling||previousRetain!==this.memoryRetainBehindCeiling;
+    if(changed){
+      const direction=this.memoryVideoAheadCeiling<previousAhead||this.memoryVideoQueueMaxBytesCeiling<previousBytes?"decreased":"increased";
+      const entry:MemoryBufferAdjustment={atMs:Date.now(),direction,videoAheadSeconds:this.memoryVideoAheadCeiling,videoQueueMaxBytes:this.memoryVideoQueueMaxBytesCeiling,retainBehindSeconds:this.memoryRetainBehindCeiling,usedJSHeapSize:sample.usedJSHeapSize,jsHeapSizeLimit:sample.jsHeapSizeLimit};
+      this.memoryAdjustmentLog.push(entry);
+      if(this.memoryAdjustmentLog.length>20)this.memoryAdjustmentLog.shift();
+      console.info("[H422Player] memory-adaptive buffer",entry);
+    }
+    if(publish)this.publishDiagnostics();
+  }
+  /** How far behind the playhead played frames are kept before eviction; shrinks first under memory pressure. */
+  private effectiveRetainBehindSeconds():number { return Math.min(this.retainBehindSeconds,this.memoryRetainBehindCeiling??Infinity); }
   private getVideoDecoder():VideoDecoderClient { return this.videoDecoderClient??=this.dependencies.createVideoDecoder(); }
   /**
    * Frames the playhead has passed are handed back to the Worker's pool with the next decode, which
@@ -229,12 +345,24 @@ export class PlayerEngine {
    */
   private aheadSecondsTarget():number {
     const fps=this.essenceIndex?.frameRate??XDCAM_FRAME_RATE;
-    if(this.frameBytes<=0)return this.adaptiveVideoAheadSeconds;
+    // The memory-adaptive ceiling defaults to Infinity when unset (bypass-constructed test doubles,
+    // or the feature disabled), leaving the decode-speed-adaptive target as the only ceiling.
+    const ceilingSeconds=Math.min(this.adaptiveVideoAheadSeconds,this.memoryVideoAheadCeiling??Infinity);
+    const minAheadSeconds=this.minVideoAheadSeconds??0;
+    if(this.frameBytes<=0)return Math.max(minAheadSeconds,ceilingSeconds);
     // A refill decision always adds a whole chunk, so the target has to leave room for one.
     // Without that the queue lands a chunk past the budget every time it tops up.
-    const chunkFrames=Math.ceil((this.chunkSeconds??3)*fps),budgetFrames=Math.floor(this.videoQueueMaxBytes/this.frameBytes);
-    return Math.min(this.adaptiveVideoAheadSeconds,Math.max(1,budgetFrames-chunkFrames)/fps);
+    const chunkFrames=Math.ceil((this.chunkSeconds??3)*fps);
+    // The floor is measured against the host's own ceiling, not the memory-shrunk one: a deliberately
+    // tiny `videoQueueMaxBytes` still wins (see "still asks for one frame..."), but memory pressure
+    // alone must never collapse the look-ahead below the configured floor - that is the exact
+    // short-buffer stutter this floor exists to prevent.
+    const hostBudgetFrames=Math.floor(this.videoQueueMaxBytes/this.frameBytes),floorSeconds=Math.min(minAheadSeconds,Math.max(1,hostBudgetFrames-chunkFrames)/fps);
+    const effectiveMaxBytes=Math.min(this.videoQueueMaxBytes,this.memoryVideoQueueMaxBytesCeiling??Infinity),budgetFrames=Math.floor(effectiveMaxBytes/this.frameBytes);
+    return Math.max(floorSeconds,Math.min(ceilingSeconds,Math.max(1,budgetFrames-chunkFrames)/fps));
   }
+  /** The byte ceiling currently in effect: the host's hard cap, tightened by memory pressure if any. */
+  private effectiveVideoQueueMaxBytes():number { return Math.min(this.videoQueueMaxBytes,this.memoryVideoQueueMaxBytesCeiling??Infinity); }
   private refillThresholdTarget():number { return Math.min(this.adaptiveRefillThresholdSeconds,Math.max(.25,this.aheadSecondsTarget()-.25)); }
   private videoQueueBytes():number { return this.frames.length*this.frameBytes; }
   /**
@@ -256,7 +384,16 @@ export class PlayerEngine {
   private destroyReader(reader?:RandomAccessReader & {destroy():void}){if(!reader)return;const destroyed=this.destroyedReaders??=new WeakSet<object>();if(destroyed.has(reader))return;destroyed.add(reader);reader.destroy();}
   private releaseReader(expected?:RandomAccessReader & {destroy():void}){const reader=expected??this.reader;if(!reader)return;if(this.reader===reader)this.reader=undefined;this.destroyReader(reader);}
   private abortFill(){this.fillController?.abort();this.fillController=undefined;this.filling=undefined;this.audioFillController?.abort();this.audioFillController=undefined;this.audioFilling=undefined;this.videoPrefetch=undefined;}
-  private setBuffering(value:boolean){if(this.buffering===value)return;this.buffering=value;this.callbacks.buffering?.(value);this.emitState();}
+  private setBuffering(value:boolean){
+    if(this.buffering===value)return;
+    this.buffering=value;
+    // Counted from setBuffering rather than setStatus("buffering") so it only reflects a stall during
+    // playback: the initial fill in load() never calls setBuffering, and a paused/seek wait is not a
+    // stall either.
+    if(value){this.bufferingEventCount++;this.bufferingStartedAtMs=performance.now();}
+    else if(this.bufferingStartedAtMs!==undefined){this.bufferingTotalMs+=performance.now()-this.bufferingStartedAtMs;this.bufferingStartedAtMs=undefined;}
+    this.callbacks.buffering?.(value);this.emitState();
+  }
   /** How much media is queued in the direction of travel. */
   private bufferedAhead(t:number):number { return this.isReverse()?t-(this.frames[0]?.time??t):(this.frames.at(-1)?.time??t)-t; }
   /** Reverse runs out at the head of the media, not at its tail. */
@@ -283,6 +420,7 @@ export class PlayerEngine {
   private failStreaming(error:Error){this.abortFill();this.invalidateStreamingVideoDecoder();cancelAnimationFrame(this.raf);this.raf=0;this.resumeAfterBuffer=false;this.setBuffering(false);this.stopAudioSource();void this.audio?.suspend();this.clearFrames();this.releaseReader();this.setStatus("error");this.callbacks.error(error);}
   async load(source: File|Blob|string): Promise<void> {
     this.videoDecodedFrames=0;this.videoDecodeMs=0;this.videoColorConvertMs=0;this.videoUploadMs=0;this.lastChunkDecodeMs=0;this.frameBytes=0;this.adaptiveVideoAheadSeconds=this.videoAheadSeconds;this.adaptiveRefillThresholdSeconds=this.refillThresholdSeconds;this.clearFrames();this.stopAudioSource();this.invalidateStreamingVideoDecoder();const previousAudio=this.audio;this.audio=undefined;if(previousAudio)await previousAudio.close();this.audioBuffer=undefined;this.streamingAudioSupported=false;this.audioFormatBasis=null;this.selectedAudioTrackNumber=undefined;this.audioSampleRate=undefined;this.audioChannels=undefined;this.audioChunks=[];this.scheduledAudio=[];this.audioBytesLoaded=0;this.audioQueuedThroughTime=0;this.audioExhausted=false;this.lastAudioTime=0;this.audioMediaAnchor=undefined;this.audioContextAnchor=undefined;this.lastAudioLevels=undefined; this.abortFill();this.setBuffering(false);this.setSeeking(false); this.releaseReader(); this.seekController?.abort(); this.seekGeneration++;
+    this.bufferingEventCount=0;this.bufferingTotalMs=0;this.bufferingStartedAtMs=undefined;this.memoryAdjustmentLog=[];
     this.loadController?.abort(); const controller=new AbortController(); this.loadController=controller; const {signal}=controller, generation=++this.loadGeneration;
     const current=()=>!signal.aborted&&!this.destroyed&&this.loadGeneration===generation;
     this.setStatus("loading");
@@ -312,7 +450,11 @@ export class PlayerEngine {
         console.info("[H422Player] streaming:libav:start", { generation, base:this.libavBase }); await this.getVideoDecoder().init(this.libavBase);console.info("[H422Player] streaming:libav:complete", { generation });if(!current())return;
         this.timecodeInfo=timecodeInfo;this.durationValue=(metadata.mediaInfo.durationFrames??this.essenceIndex.packets.filter(p=>p.kind==="video").length)/frameRate;this.frames=[];this.queuedThroughFrame=-1;
         this.configureStreamingAudio(metadata.mediaInfo);
-        console.info("[H422Player] streaming:initial-fill:start", { generation, targetSeconds:this.videoAheadSeconds }); const initialFill=new AbortController();this.fillController=initialFill;await this.fillInitialStreamingBuffer(initialFill.signal,generation,this.seekGeneration);if(this.fillController===initialFill)this.fillController=undefined;if(!current())return;const first=this.frames[0];if(!first)throw new Error("The MPEG-2 decoder returned no frames");
+        // Reads current memory pressure once before deciding the initial buffer target: on a machine
+        // already under pressure before any file was chosen, waiting for the first periodic check
+        // would size the initial fill for a machine that is not the one actually running.
+        this.checkMemoryPressure(false);
+        console.info("[H422Player] streaming:initial-fill:start", { generation, targetSeconds:this.aheadSecondsTarget() }); const initialFill=new AbortController();this.fillController=initialFill;await this.fillInitialStreamingBuffer(initialFill.signal,generation,this.seekGeneration);if(this.fillController===initialFill)this.fillController=undefined;if(!current())return;const first=this.frames[0];if(!first)throw new Error("The MPEG-2 decoder returned no frames");
         this.drawFrame(first.frame);this.callbacks.mediaInfo?.(metadata.mediaInfo);this.callbacks.timecode?.(timecodeInfo?timecodeAtSeconds(timecodeInfo,0):null);this.callbacks.ready({width:first.frame.width,height:first.frame.height,frameRate,duration:this.durationValue,audioSampleRate:this.audioSampleRate??48000,audioChannels:this.streamingAudioSupported?this.audioChannels!:0});this.setStatus("ready");this.emitPlaybackRate();this.publishDiagnostics();this.requestFill(0);this.requestAudioFill(0);console.info("[H422Player] streaming:ready", { generation, duration:this.durationValue, frames:this.frames.length, diagnostics:this.getDiagnostics() });return;
       }
       // Compatibility path intentionally retains contiguous full-file decoding.
@@ -489,8 +631,9 @@ export class PlayerEngine {
    * must not be tied to rAF: a hidden tab stops rAF while the refill timer keeps queueing frames.
    */
   private evictPlayedMedia(t:number):void{
+    const retainBehind=this.effectiveRetainBehindSeconds();
     // In reverse the playhead moves down, so the frames behind it are the ones above t.
-    if(this.isReverse())this.evictFramesAfter(t+this.retainBehindSeconds); else this.evictFramesBefore(t-this.retainBehindSeconds);
+    if(this.isReverse())this.evictFramesAfter(t+retainBehind); else this.evictFramesBefore(t-retainBehind);
     this.audioChunks=(this.audioChunks??[]).filter(chunk=>chunk.mediaEndTime>=t-.1);
     this.scheduledAudio=(this.scheduledAudio??[]).filter(range=>!range.ended&&range.mediaEndTime>=t-.1);
   }
@@ -603,5 +746,5 @@ export class PlayerEngine {
   private emitTime(t:number){this.callbacks.time(t);this.callbacks.timecode?.(this.timecodeInfo ? timecodeAtSeconds(this.timecodeInfo,t) : null);}
   private drawAt(t:number,exact=false):RenderFrame|undefined{const requested=Math.round(t*(this.essenceIndex?.frameRate??XDCAM_FRAME_RATE));let f:RenderFrame|undefined;if(this.mode==="streaming"){if(exact)f=this.frames.find(item=>item.mediaFrame===requested);else if(this.isReverse())f=this.frames.find(item=>item.time>=t-.001);else for(let i=this.frames.length-1;i>=0;i--){if(this.frames[i].time<=t+.001){f=this.frames[i];break;}}}else f=this.frames[Math.min(this.frames.length-1,Math.floor(t*XDCAM_FRAME_RATE))];if(f)this.drawFrame(f.frame);return f;}
   private tick():void{if(this.destroyed||this.status!=="playing")return;const t=this.currentTime;if(this.mode==="streaming"){this.evictPlayedMedia(t);if(this.isReverse()){if(t<=0){this.finishReachedStart();return;}}else if(this.streamAtEnd(t)){this.finishEnded();return;}const hasFuture=this.isReverse()?this.frames.some(frame=>frame.time<=t)||this.fillExhausted():this.frames.some(frame=>frame.time>=t),hasAudio=this.audioReadyAt(t);if((!hasFuture||!hasAudio)&&t<this.durationValue){this.pausedAt=Math.min(t,this.durationValue);this.resumeAfterBuffer=true;cancelAnimationFrame(this.raf);this.raf=0;this.stopStreamingAudioSources();void this.audio?.suspend();this.setStatus("buffering");this.setBuffering(true);this.requestFill(this.pausedAt,true);this.requestAudioFill(this.pausedAt);return;}this.requestFill(t);this.requestAudioFill(t);}this.drawAt(t);this.emitTime(t);if(!this.isReverse()&&t>=this.durationValue){this.finishEnded();return;}this.raf=requestAnimationFrame(()=>this.tick());}
-  destroy():void{this.destroyed=true;this.stopAudioLevelSampling();this.loadGeneration++;this.seekGeneration++;this.abortFill();this.invalidateStreamingVideoDecoder();this.setBuffering(false);this.loadController?.abort();this.seekController?.abort();cancelAnimationFrame(this.raf);this.raf=0;this.stopAudioSource();this.releaseReader();void this.audio?.close();this.audio=undefined;this.audioChunks=[];this.scheduledAudio=[];this.audioMediaAnchor=undefined;this.audioContextAnchor=undefined;this.clearFrames();this.videoDecoderClient?.dispose();}
+  destroy():void{this.destroyed=true;this.stopAudioLevelSampling();this.stopMemoryMonitor();this.loadGeneration++;this.seekGeneration++;this.abortFill();this.invalidateStreamingVideoDecoder();this.setBuffering(false);this.loadController?.abort();this.seekController?.abort();cancelAnimationFrame(this.raf);this.raf=0;this.stopAudioSource();this.releaseReader();void this.audio?.close();this.audio=undefined;this.audioChunks=[];this.scheduledAudio=[];this.audioMediaAnchor=undefined;this.audioContextAnchor=undefined;this.clearFrames();this.videoDecoderClient?.dispose();}
 }
