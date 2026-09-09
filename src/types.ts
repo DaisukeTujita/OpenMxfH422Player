@@ -40,6 +40,18 @@ export interface AudioLevels {
   channels: AudioChannelLevel[];
 }
 
+/** One step the memory-adaptive buffer took, and the heap reading that triggered it. */
+export interface MemoryBufferAdjustment {
+  /** Wall-clock time the adjustment was made (`Date.now()`). */
+  atMs: number;
+  direction: "increased" | "decreased";
+  videoAheadSeconds: number;
+  videoQueueMaxBytes: number;
+  retainBehindSeconds: number;
+  usedJSHeapSize: number;
+  jsHeapSizeLimit: number;
+}
+
 export interface PlayerDiagnostics {
   mode: PlaybackMode; videoRenderMode: VideoRenderMode; fileSize: number; bytesLoaded: number; underlyingReadCount: number;
   cacheBytes: number; videoQueueFrames: number; videoQueueStart: number | null;
@@ -64,6 +76,18 @@ export interface PlayerDiagnostics {
   /** 0 when audio is muted because the rate is decimated or reversed. */
   audioPlaybackRate?: number;
   lastChunkDecodeMs?: number; pooledVideoFrames?: number;
+  /** Behind-playhead retention currently applied; shrinks first under memory pressure. */
+  adaptiveRetainBehindSeconds?: number;
+  /** Byte ceiling currently applied: `videoQueueMaxBytes` tightened by memory pressure if any. */
+  adaptiveVideoQueueMaxBytes?: number;
+  /** Whether `performance.memory` is available in this browser (Chrome/Edge only). */
+  memoryApiAvailable?: boolean;
+  /** `performance.memory` readings, or null where the API is unavailable. */
+  jsHeapUsedBytes?: number | null; jsHeapLimitBytes?: number | null; jsHeapAvailableBytes?: number | null;
+  /** How many times the memory-adaptive buffer target has changed this load, and a short log of them. */
+  memoryBufferAdjustmentCount?: number; memoryBufferAdjustments?: MemoryBufferAdjustment[];
+  /** Since the current load: how many times playback stalled waiting for a refill, and for how long in total. */
+  bufferingEventCount?: number; bufferingTotalMs?: number;
 }
 
 export interface PlayerInfo {
@@ -130,6 +154,23 @@ export interface H422PlayerProps {
    * gets faster. Defaults to DEFAULT_FULL_DECODE_MAX_RATE.
    */
   fullDecodeMaxRate?: number;
+  /**
+   * Polls `performance.memory` (Chrome/Edge only) and shrinks the buffer target under memory
+   * pressure, growing it back as pressure eases. Enabled by default; on a browser without the API
+   * a fixed conservative target is used instead of the full default. See the individual
+   * `memory*`/`min*`/`fallback*` props to tune thresholds and floors.
+   */
+  enableMemoryAdaptiveBuffer?: boolean;
+  memoryCheckIntervalMs?: number;
+  memoryHighWaterRatio?: number;
+  memoryLowWaterRatio?: number;
+  memoryShrinkFactor?: number;
+  memoryGrowFactor?: number;
+  minVideoAheadSeconds?: number;
+  minVideoQueueMaxBytes?: number;
+  minRetainBehindSeconds?: number;
+  fallbackVideoAheadSeconds?: number;
+  fallbackVideoQueueMaxBytes?: number;
   /**
    * Measures the level of the first two audio channels while playing. Off by default: metering a
    * stream nobody displays is pure overhead. Toggling this prop starts and stops the measurement
