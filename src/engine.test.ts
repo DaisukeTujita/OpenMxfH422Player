@@ -816,6 +816,19 @@ describe("PlayerEngine streaming mode",()=>{
     await h.engine.seek(10);expect(h.engine.seekSource).toBe("sequential-fallback");expect(h.engine.actualDisplayedFrame).toBe(100);
   });
 
+  it("clears a stale exhausted-audio latch on seek, so replaying after a completed playthrough does not stall in buffering forever",async()=>{
+    vi.stubGlobal("cancelAnimationFrame",vi.fn());const h=streamingPlaybackHarness();h.engine.status="paused";h.engine.indexTables=[];
+    // Simulates state left behind by a playthrough that ran to the end: `audioExhausted` only ever
+    // gets set true and `audioQueuedThroughTime` is never rewound, so both are stale relative to a
+    // seek back to the start.
+    h.engine.audioExhausted=true;h.engine.audioQueuedThroughTime=19.9;
+    h.engine.fillStreaming=vi.fn(async(target:number)=>{h.engine.frames=[{frame:planarFrame(),time:target/10,mediaFrame:target}];return true;});
+    h.engine.fillStreamingAudio=vi.fn(async()=>true);
+    await h.engine.seek(0);
+    expect(h.engine.audioExhausted).toBe(false);
+    expect(h.engine.audioQueuedThroughTime).toBe(0);
+  });
+
   it("does not auto-resume after pause while buffering",()=>{
     vi.stubGlobal("cancelAnimationFrame",vi.fn());const h=streamingPlaybackHarness();h.engine.status="buffering";h.engine.buffering=true;h.engine.resumeAfterBuffer=true;h.engine.abortFill=vi.fn();h.engine.pause();expect(h.engine.resumeAfterBuffer).toBe(false);expect(h.engine.status).toBe("paused");expect(h.callbacks.buffering).toHaveBeenLastCalledWith(false);
   });
